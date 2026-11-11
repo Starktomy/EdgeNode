@@ -22,15 +22,14 @@ func NewGzipWriter(writer io.Writer, level int) (Writer, error) {
 func newGzipWriter(writer io.Writer) (Writer, error) {
 	var level = GenerateCompressLevel(gzip.BestSpeed, gzip.BestCompression)
 
-	gzipWriter, err := gzip.NewWriterLevel(writer, level)
+	result := &GzipWriter{BaseWriter: BaseWriter{parent: writer}, level: level}
+	gzipWriter, err := gzip.NewWriterLevel(&result.BaseWriter, level)
 	if err != nil {
 		return nil, err
 	}
 
-	return &GzipWriter{
-		writer: gzipWriter,
-		level:  level,
-	}, nil
+	result.writer = gzipWriter
+	return result, nil
 }
 
 func (this *GzipWriter) Write(p []byte) (int, error) {
@@ -42,7 +41,8 @@ func (this *GzipWriter) Flush() error {
 }
 
 func (this *GzipWriter) Reset(writer io.Writer) {
-	this.writer.Reset(writer)
+	this.parent = writer
+	this.writer.Reset(&this.BaseWriter)
 }
 
 func (this *GzipWriter) RawClose() error {

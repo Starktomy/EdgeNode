@@ -3,11 +3,15 @@
 package compressions
 
 import (
+	"io"
 	"sync/atomic"
 )
 
 type BaseWriter struct {
 	pool *WriterPool
+	// The codec retains this stable adapter instead of a request's output
+	// chain. Clear the parent at Close without resetting codec state twice.
+	parent io.Writer
 
 	isFinished bool
 
@@ -23,11 +27,21 @@ func (this *BaseWriter) Finish(obj Writer) error {
 		return nil
 	}
 	err := obj.RawClose()
+	this.isFinished = true
+	this.parent = nil
 	if err == nil && this.pool != nil {
+		// Put transfers ownership. Never touch this object after publication;
+		// another request may already have reset and started using it.
 		this.pool.Put(obj)
 	}
-	this.isFinished = true
 	return err
+}
+
+func (this *BaseWriter) Write(p []byte) (int, error) {
+	if this.parent == nil {
+		return 0, io.ErrClosedPipe
+	}
+	return this.parent.Write(p)
 }
 
 func (this *BaseWriter) ResetFinish() {

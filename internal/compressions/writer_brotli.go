@@ -22,13 +22,12 @@ func NewBrotliWriter(writer io.Writer, level int) (Writer, error) {
 
 func newBrotliWriter(writer io.Writer) (*BrotliWriter, error) {
 	var level = GenerateCompressLevel(brotli.BestSpeed, brotli.BestCompression)
-	return &BrotliWriter{
-		writer: brotli.NewWriterOptions(writer, brotli.WriterOptions{
-			Quality: level,
-			LGWin:   14, // TODO 在全局设置里可以设置此值
-		}),
-		level: level,
-	}, nil
+	result := &BrotliWriter{BaseWriter: BaseWriter{parent: writer}, level: level}
+	result.writer = brotli.NewWriterOptions(&result.BaseWriter, brotli.WriterOptions{
+		Quality: level,
+		LGWin:   14, // TODO 在全局设置里可以设置此值
+	})
+	return result, nil
 }
 
 func (this *BrotliWriter) Write(p []byte) (int, error) {
@@ -40,7 +39,8 @@ func (this *BrotliWriter) Flush() error {
 }
 
 func (this *BrotliWriter) Reset(newWriter io.Writer) {
-	this.writer.Reset(newWriter)
+	this.parent = newWriter
+	this.writer.Reset(&this.BaseWriter)
 }
 
 func (this *BrotliWriter) RawClose() error {

@@ -41,3 +41,32 @@ func BenchmarkTrafficStatManager_Add(b *testing.B) {
 		}
 	})
 }
+
+// Keep domain input outside the timed loop: allocation measurements must
+// describe statistics updates, not benchmark-only random host generation.
+func BenchmarkTrafficStatManagerFixedDomain(b *testing.B) {
+	for _, domain := range []string{"cdn.example.test", "a-very-long-but-valid-tenant-hostname-for-the-fixed-domain-benchmark.example.test"} {
+		b.Run(domain, func(b *testing.B) {
+			manager := NewTrafficStatManager()
+			manager.Add(42, 12345, domain, 1024, 512, 1, 0, 0, 0, 0, false, 0)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				manager.Add(42, 12345, domain, 1024, 512, 1, 0, 0, 0, 0, false, 0)
+			}
+		})
+	}
+}
+
+func BenchmarkTrafficStatManagerParallel(b *testing.B) {
+	manager := NewTrafficStatManager()
+	const domain = "cdn.example.test"
+	manager.Add(42, 12345, domain, 1024, 512, 1, 0, 0, 0, 0, false, 0)
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			manager.Add(42, 12345, domain, 1024, 512, 1, 0, 0, 0, 0, false, 0)
+		}
+	})
+}

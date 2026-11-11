@@ -3,6 +3,9 @@
 package memutils
 
 import (
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	teaconst "github.com/TeaOSLab/EdgeNode/internal/const"
@@ -10,9 +13,66 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 )
 
-var systemTotalMemory = -1
-var systemMemoryBytes uint64
-var availableMemoryGB int
+type memorySnapshot struct {
+	totalBytes     uint64
+	availableBytes uint64
+}
+
+// Readers only load an immutable snapshot; procfs/cgroup reads run at startup
+// and on the background timer, never on a request's cached getter path.
+type memoryMonitor struct {
+	once       sync.Once
+	state      atomic.Pointer[memorySnapshot]
+	refreshMu  sync.Mutex
+	readMemory func() (memorySnapshot, error)
+	applyLimit func(uint64)
+}
+
+var systemMemory = memoryMonitor{
+	readMemory: readSystemMemory,
+	applyLimit: setMaxMemory,
+}
+
+func (m *memoryMonitor) snapshot() *memorySnapshot {
+	m.once.Do(m.refresh)
+	return m.state.Load()
+}
+
+func (m *memoryMonitor) refresh() {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+
+	stat, err := m.readMemory()
+	if err != nil || stat.totalBytes == 0 {
+		// Retain a previous valid budget on transient host-stat failures. An
+		// unknown initial budget must not set a zero-byte Go memory limit.
+		if m.state.Load() == nil {
+			m.state.Store(&memorySnapshot{})
+		}
+		return
+	}
+	if stat.availableBytes > stat.totalBytes {
+		stat.availableBytes = stat.totalBytes
+	}
+	if m.applyLimit != nil {
+		m.applyLimit(stat.totalBytes)
+	}
+	m.state.Store(&stat)
+}
+
+func readSystemMemory() (memorySnapshot, error) {
+	stat, err := mem.VirtualMemory()
+	if err != nil {
+		return memorySnapshot{}, err
+	}
+	if stat.Total == 0 {
+		return memorySnapshot{}, fmt.Errorf("system memory total is unavailable")
+	}
+	return effectiveMemory(memorySnapshot{
+		totalBytes:     stat.Total,
+		availableBytes: stat.Available,
+	}), nil
+}
 
 func init() {
 	if !teaconst.IsMain {
@@ -23,46 +83,33 @@ func init() {
 
 	goman.New(func() {
 		var ticker = time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
 		for range ticker.C {
-			stat, err := mem.VirtualMemory()
-			if err == nil {
-				availableMemoryGB = int(stat.Available >> 30)
-			}
+			systemMemory.refresh()
 		}
 	})
 }
 
-// SystemMemoryGB 系统内存GB数量
-// 必须保证不小于1
+// SystemMemoryGB 返回有效内存的整 GiB 数，兼容旧调用方，必须不小于 1。
+// 小于 1 GiB 的精确资源预算请使用 SystemMemoryBytes。
 func SystemMemoryGB() int {
-	if systemTotalMemory > 0 {
-		return systemTotalMemory
-	}
+	return memoryGB(systemMemory.snapshot().totalBytes)
+}
 
-	stat, err := mem.VirtualMemory()
-	if err != nil {
+func memoryGB(totalBytes uint64) int {
+	if totalBytes < 1<<30 {
 		return 1
 	}
-
-	systemMemoryBytes = stat.Total
-
-	availableMemoryGB = int(stat.Available >> 30)
-	systemTotalMemory = int(stat.Total >> 30)
-	if systemTotalMemory <= 0 {
-		systemTotalMemory = 1
-	}
-
-	setMaxMemory(systemTotalMemory)
-
-	return systemTotalMemory
+	return int(totalBytes >> 30)
 }
 
-// SystemMemoryBytes 系统内存总字节数
+// SystemMemoryBytes 返回宿主机与可见 cgroup 限额中的最小有效字节数。
+// 无法初始化系统内存信息时返回 0，调用方应使用保守的回退预算。
 func SystemMemoryBytes() uint64 {
-	return systemMemoryBytes
+	return systemMemory.snapshot().totalBytes
 }
 
-// AvailableMemoryGB 获取当下可用内存GB数
+// AvailableMemoryGB 返回最近快照中的可用整 GiB 数，可以为 0。
 func AvailableMemoryGB() int {
-	return availableMemoryGB
+	return int(systemMemory.snapshot().availableBytes >> 30)
 }

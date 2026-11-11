@@ -1,0 +1,132 @@
+Baseline code: 3d555b9; Go 1.27.4; Linux/amd64; real fsync enabled.
+
+Traffic fixed domains; 750ms, count=5, cpu=1,4
+goos: linux
+goarch: amd64
+pkg: github.com/TeaOSLab/EdgeNode/internal/stats
+cpu: AMD EPYC 7643 48-Core Processor                
+BenchmarkTrafficStatManagerFixedDomain/cdn.example.test           	 6546812	       132.5 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/cdn.example.test           	 6817183	       132.5 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/cdn.example.test           	 6869551	       131.7 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/cdn.example.test           	 6735040	       131.6 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/cdn.example.test           	 6438481	       139.3 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/cdn.example.test-4         	 6959887	       159.2 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/cdn.example.test-4         	 6671954	       138.5 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/cdn.example.test-4         	 6328975	       158.1 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/cdn.example.test-4         	 5744044	       138.9 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/cdn.example.test-4         	 6353012	       154.8 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/a-very-long-but-valid-tenant-hostname-for-the-fixed-domain-benchmark.example.test           	 6385087	       153.5 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/a-very-long-but-valid-tenant-hostname-for-the-fixed-domain-benchmark.example.test           	 5676859	       148.8 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/a-very-long-but-valid-tenant-hostname-for-the-fixed-domain-benchmark.example.test           	 6422643	       136.0 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/a-very-long-but-valid-tenant-hostname-for-the-fixed-domain-benchmark.example.test           	 6443540	       137.6 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/a-very-long-but-valid-tenant-hostname-for-the-fixed-domain-benchmark.example.test           	 6698749	       138.4 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/a-very-long-but-valid-tenant-hostname-for-the-fixed-domain-benchmark.example.test-4         	 6661514	       152.3 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/a-very-long-but-valid-tenant-hostname-for-the-fixed-domain-benchmark.example.test-4         	 5231466	       144.8 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/a-very-long-but-valid-tenant-hostname-for-the-fixed-domain-benchmark.example.test-4         	 6216741	       141.5 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/a-very-long-but-valid-tenant-hostname-for-the-fixed-domain-benchmark.example.test-4         	 5767035	       147.9 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerFixedDomain/a-very-long-but-valid-tenant-hostname-for-the-fixed-domain-benchmark.example.test-4         	 6328873	       138.7 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerParallel                                                                                                	 6361729	       134.0 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerParallel                                                                                                	 6687960	       130.3 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerParallel                                                                                                	 6570144	       131.6 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerParallel                                                                                                	 6886437	       130.4 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerParallel                                                                                                	 6718462	       136.7 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerParallel-4                                                                                              	 4932904	       184.5 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerParallel-4                                                                                              	 3929408	       278.1 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerParallel-4                                                                                              	 3620066	       265.7 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerParallel-4                                                                                              	 3970936	       253.7 ns/op	      16 B/op	       2 allocs/op
+BenchmarkTrafficStatManagerParallel-4                                                                                              	 3213066	       265.0 ns/op	      16 B/op	       2 allocs/op
+PASS
+ok  	github.com/TeaOSLab/EdgeNode/internal/stats	33.140s
+
+Spool metadata backlog and first-send failure with WalkPending; 500ms, count=3
+goos: linux
+goarch: amd64
+pkg: github.com/TeaOSLab/EdgeNode/internal/delivery
+cpu: AMD EPYC 7643 48-Core Processor                
+BenchmarkSpoolPendingBacklog/Files0-5         	   86169	      6661 ns/op	     200 B/op	       4 allocs/op
+BenchmarkSpoolPendingBacklog/Files0-5         	   85243	      7577 ns/op	     200 B/op	       4 allocs/op
+BenchmarkSpoolPendingBacklog/Files0-5         	   79041	      7016 ns/op	     200 B/op	       4 allocs/op
+BenchmarkSpoolPendingBacklog/Files256-5       	     842	    753722 ns/op	  130769 B/op	    1109 allocs/op
+BenchmarkSpoolPendingBacklog/Files256-5       	     697	    807075 ns/op	  130752 B/op	    1109 allocs/op
+BenchmarkSpoolPendingBacklog/Files256-5       	     853	    760699 ns/op	  130736 B/op	    1109 allocs/op
+BenchmarkSpoolPendingBacklog/Files4096-5      	      51	  12111978 ns/op	 1985660 B/op	   16710 allocs/op
+BenchmarkSpoolPendingBacklog/Files4096-5      	      52	  10960100 ns/op	 1985643 B/op	   16710 allocs/op
+BenchmarkSpoolPendingBacklog/Files4096-5      	      54	  11006560 ns/op	 1985488 B/op	   16710 allocs/op
+BenchmarkSpoolAppendBacklog/Files0-5          	   10000	     59538 ns/op	    2322 B/op	      31 allocs/op
+BenchmarkSpoolAppendBacklog/Files0-5          	   10024	     58026 ns/op	    2325 B/op	      31 allocs/op
+BenchmarkSpoolAppendBacklog/Files0-5          	    8430	     60261 ns/op	    2306 B/op	      31 allocs/op
+BenchmarkSpoolAppendBacklog/Files256-5        	     847	    742731 ns/op	  126032 B/op	    1071 allocs/op
+BenchmarkSpoolAppendBacklog/Files256-5        	     870	    695056 ns/op	  126039 B/op	    1071 allocs/op
+BenchmarkSpoolAppendBacklog/Files256-5        	     844	    733557 ns/op	  126081 B/op	    1071 allocs/op
+BenchmarkSpoolAppendBacklog/Files4095-5       	      52	  11388576 ns/op	 1980947 B/op	   16668 allocs/op
+BenchmarkSpoolAppendBacklog/Files4095-5       	      49	  11397329 ns/op	 1981168 B/op	   16668 allocs/op
+BenchmarkSpoolAppendBacklog/Files4095-5       	      46	  11137259 ns/op	 1980326 B/op	   16668 allocs/op
+BenchmarkSpoolDeliveryFailure/Payload1MiB-5   	    1794	    422142 ns/op	 1064727 B/op	      49 allocs/op
+BenchmarkSpoolDeliveryFailure/Payload1MiB-5   	    1804	    438427 ns/op	 1064674 B/op	      49 allocs/op
+BenchmarkSpoolDeliveryFailure/Payload1MiB-5   	    2068	    327799 ns/op	 1064217 B/op	      49 allocs/op
+BenchmarkSpoolDeliveryFailure/Payload4MiB-5   	     518	   1439850 ns/op	 4211529 B/op	      50 allocs/op
+BenchmarkSpoolDeliveryFailure/Payload4MiB-5   	     516	   1039394 ns/op	 4209862 B/op	      49 allocs/op
+BenchmarkSpoolDeliveryFailure/Payload4MiB-5   	     481	   1234669 ns/op	 4210817 B/op	      50 allocs/op
+BenchmarkSpoolDeliveryFailure/Payload16MiB-5  	     139	   3922279 ns/op	16794217 B/op	      50 allocs/op
+BenchmarkSpoolDeliveryFailure/Payload16MiB-5  	     140	   4040014 ns/op	16793377 B/op	      50 allocs/op
+BenchmarkSpoolDeliveryFailure/Payload16MiB-5  	     147	   4081474 ns/op	16792607 B/op	      50 allocs/op
+PASS
+ok  	github.com/TeaOSLab/EdgeNode/internal/delivery	24.996s
+
+Schema-aware decode preflight; 500ms, count=3
+goos: linux
+goarch: amd64
+pkg: github.com/TeaOSLab/EdgeNode/internal/delivery
+cpu: AMD EPYC 7643 48-Core Processor                
+BenchmarkValidateBatchRecords/Records1000-5         	   14238	     41504 ns/op	       0 B/op	       0 allocs/op
+BenchmarkValidateBatchRecords/Records1000-5         	   14606	     38472 ns/op	       0 B/op	       0 allocs/op
+BenchmarkValidateBatchRecords/Records1000-5         	   14620	     34420 ns/op	       0 B/op	       0 allocs/op
+BenchmarkValidateBatchRecords/Records2000-5         	    7135	     71384 ns/op	       0 B/op	       0 allocs/op
+BenchmarkValidateBatchRecords/Records2000-5         	    8545	     72002 ns/op	       0 B/op	       0 allocs/op
+BenchmarkValidateBatchRecords/Records2000-5         	    8239	     72202 ns/op	       0 B/op	       0 allocs/op
+BenchmarkValidateBatchRecords/Records8192-5         	    6620	     76666 ns/op	       0 B/op	       0 allocs/op
+BenchmarkValidateBatchRecords/Records8192-5         	    8200	     71349 ns/op	       0 B/op	       0 allocs/op
+BenchmarkValidateBatchRecords/Records8192-5         	    8792	     68916 ns/op	       0 B/op	       0 allocs/op
+BenchmarkValidateBatchRecordsNested-5               	     100	   5358658 ns/op	 239.61 MB/s	       0 B/op	       0 allocs/op
+BenchmarkValidateBatchRecordsNested-5               	     100	   5208752 ns/op	 246.51 MB/s	       0 B/op	       0 allocs/op
+BenchmarkValidateBatchRecordsNested-5               	     100	   5443512 ns/op	 235.88 MB/s	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/TeaOSLab/EdgeNode/internal/delivery	9.206s
+
+Access log Push after producer element budget; 500ms, count=3, cpu=1
+goos: linux
+goarch: amd64
+pkg: github.com/TeaOSLab/EdgeNode/internal/nodes
+cpu: AMD EPYC 7643 48-Core Processor                
+BenchmarkAccessLogPushBudget/Headers0         	 1946414	       292.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAccessLogPushBudget/Headers0         	 1956421	       311.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAccessLogPushBudget/Headers0         	 1946286	       300.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAccessLogPushBudget/Headers20        	  197072	      3444 ns/op	     320 B/op	      20 allocs/op
+BenchmarkAccessLogPushBudget/Headers20        	  199509	      3390 ns/op	     320 B/op	      20 allocs/op
+BenchmarkAccessLogPushBudget/Headers20        	  201477	      3689 ns/op	     320 B/op	      20 allocs/op
+BenchmarkAccessLogPushBudget/Headers40        	   91065	      6006 ns/op	     640 B/op	      40 allocs/op
+BenchmarkAccessLogPushBudget/Headers40        	   95872	      5899 ns/op	     640 B/op	      40 allocs/op
+BenchmarkAccessLogPushBudget/Headers40        	  103539	      6170 ns/op	     640 B/op	      40 allocs/op
+PASS
+ok  	github.com/TeaOSLab/EdgeNode/internal/nodes	6.935s
+
+Final targeted delivery/stats/nodes race suite including producer element budget
+ok  	github.com/TeaOSLab/EdgeNode/internal/delivery	1.527s
+ok  	github.com/TeaOSLab/EdgeNode/internal/stats	1.136s
+ok  	github.com/TeaOSLab/EdgeNode/internal/nodes	3.120s
+
+Bounded preflight fuzz, 5s, 2 workers
+fuzz: elapsed: 0s, gathering baseline coverage: 0/7 completed
+fuzz: elapsed: 0s, gathering baseline coverage: 7/7 completed, now fuzzing with 2 workers
+fuzz: elapsed: 3s, execs: 14365 (4788/sec), new interesting: 31 (total: 38)
+fuzz: elapsed: 6s, execs: 21924 (2519/sec), new interesting: 42 (total: 49)
+fuzz: elapsed: 6s, execs: 21924 (0/sec), new interesting: 42 (total: 49)
+PASS
+ok  	github.com/TeaOSLab/EdgeNode/internal/delivery	6.035s
+
+Independent end-to-end review of 2000 logs with 33 header values each
+=== RUN   TestReviewProducerBatchRemainsSendable
+    review_generated_batch_test.go:22: admitted locally-generated batches=2 first-batch-bytes=902562 records=2000
+--- PASS: TestReviewProducerBatchRemainsSendable (0.14s)
+PASS
+ok  	github.com/TeaOSLab/EdgeNode/internal/nodes	0.158s

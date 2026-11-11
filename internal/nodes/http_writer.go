@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -90,6 +91,11 @@ type HTTPWriter struct {
 
 	cacheReader       caches.Reader
 	cacheReaderSuffix string
+
+	cacheVaryLines []string
+	cacheVaryLine  string
+	cacheVaryValid bool
+	cacheVaryReady bool
 
 	statusSent bool
 }
@@ -178,7 +184,7 @@ func (this *HTTPWriter) PrepareCache(resp *http.Response, size int64) {
 		this.req.varMapping["cache.status"] = "BYPASS"
 		return
 	}
-	if _, ok := httpcache.EncodeVary(this.Header(), this.req.cacheRequestHeader); !ok {
+	if _, ok := this.cacheVaryMetadata(); !ok {
 		this.req.varMapping["cache.status"] = "BYPASS"
 		return
 	}
@@ -1337,17 +1343,36 @@ func (this *HTTPWriter) calculateHeaderLength() (result int) {
 			result += len(k) + 1 /**:**/ + len(v1) + 1 /**\n**/
 		}
 	}
-	var metadata bytes.Buffer
-	this.appendVaryMetadata(&metadata)
-	result += metadata.Len()
+	metadata, _ := this.cacheVaryMetadata()
+	result += len(metadata)
 	return
 }
 
 func (this *HTTPWriter) appendVaryMetadata(writer interface{ WriteString(string) (int, error) }) {
-	metadata, ok := httpcache.EncodeVary(this.Header(), this.req.cacheRequestHeader)
-	if ok && metadata != "" {
-		_, _ = writer.WriteString(httpcache.VaryMetadataHeader + ":" + metadata + "\n")
+	metadata, _ := this.cacheVaryMetadata()
+	if metadata != "" {
+		_, _ = writer.WriteString(metadata)
 	}
+}
+
+// All cache writers for this response share one immutable original request
+// header snapshot. Reuse its serialized representation between validation,
+// sizing and writes, rebuilding when compression or another transform changes
+// Vary. Own the line slice so an in-place response-header update is detected.
+func (this *HTTPWriter) cacheVaryMetadata() (string, bool) {
+	lines := this.Header().Values("Vary")
+	if this.cacheVaryReady && slices.Equal(this.cacheVaryLines, lines) {
+		return this.cacheVaryLine, this.cacheVaryValid
+	}
+	this.cacheVaryLines = append(this.cacheVaryLines[:0], lines...)
+	metadata, valid := httpcache.EncodeVary(this.Header(), this.req.cacheRequestHeader)
+	this.cacheVaryLine = ""
+	if valid && metadata != "" {
+		this.cacheVaryLine = httpcache.VaryMetadataHeader + ":" + metadata + "\n"
+	}
+	this.cacheVaryReady = true
+	this.cacheVaryValid = valid
+	return this.cacheVaryLine, valid
 }
 
 func (this *HTTPWriter) shouldIgnoreHeader(name string) bool {

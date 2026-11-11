@@ -21,7 +21,9 @@ func NewBrotliReader(reader io.Reader) (Reader, error) {
 }
 
 func newBrotliReader(reader io.Reader) (Reader, error) {
-	return &BrotliReader{reader: brotli.NewReader(reader)}, nil
+	result := &BrotliReader{BaseReader: BaseReader{parent: reader}}
+	result.reader = brotli.NewReader(result.input())
+	return result, nil
 }
 
 func (this *BrotliReader) Read(p []byte) (n int, err error) {
@@ -33,7 +35,8 @@ func (this *BrotliReader) Read(p []byte) (n int, err error) {
 }
 
 func (this *BrotliReader) Reset(reader io.Reader) error {
-	return this.reader.Reset(reader)
+	this.parent = reader
+	return this.reader.Reset(this.input())
 }
 
 func (this *BrotliReader) RawClose() error {

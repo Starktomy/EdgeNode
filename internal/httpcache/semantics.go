@@ -162,8 +162,30 @@ func MatchesVary(responseHeader, requestHeader http.Header) bool {
 	}
 	for _, field := range fields {
 		values, found := snapshot[field]
-		current := requestValues(requestHeader, field)
-		if !found || (values == nil) != (current == nil) || strings.Join(values, ",") != strings.Join(current, ",") {
+		current, present := requestHeader[field]
+		if !found || (values == nil) != !present {
+			return false
+		}
+		// The common case uses identical field-line boundaries. Trim while
+		// comparing instead of allocating another slice and joined strings.
+		if equalRequestValues(values, current) {
+			continue
+		}
+		// Retain compatibility when a proxy combines field lines, including
+		// commas already present in an individual value.
+		if strings.Join(values, ",") != strings.Join(requestValues(requestHeader, field), ",") {
+			return false
+		}
+	}
+	return true
+}
+
+func equalRequestValues(stored, current []string) bool {
+	if len(stored) != len(current) {
+		return false
+	}
+	for index, value := range current {
+		if stored[index] != strings.TrimSpace(value) {
 			return false
 		}
 	}

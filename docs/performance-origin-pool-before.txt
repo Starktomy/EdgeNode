@@ -1,0 +1,16 @@
+goos: linux
+goarch: amd64
+pkg: github.com/TeaOSLab/EdgeNode/internal/nodes
+cpu: AMD EPYC 7643 48-Core Processor                
+BenchmarkOriginPoolLookup/64-2         	  205915	      1519 ns/op	     947 B/op	       7 allocs/op
+BenchmarkOriginPoolLookup/64-2         	  239672	      1442 ns/op	     946 B/op	       7 allocs/op
+BenchmarkOriginPoolLookup/64-2         	  232137	      1493 ns/op	     942 B/op	       7 allocs/op
+BenchmarkOriginPoolLookup/64-2         	  239844	      1575 ns/op	     956 B/op	       7 allocs/op
+BenchmarkOriginPoolLookup/64-2         	  207510	      1790 ns/op	     942 B/op	       7 allocs/op
+BenchmarkOriginPoolLookup/4096-2       	    6510	     48227 ns/op	    1080 B/op	       8 allocs/op
+BenchmarkOriginPoolLookup/4096-2       	    7674	     49922 ns/op	    1126 B/op	       8 allocs/op
+BenchmarkOriginPoolLookup/4096-2       	    8191	     45856 ns/op	    1038 B/op	       8 allocs/op
+BenchmarkOriginPoolLookup/4096-2       	    7647	     51039 ns/op	    1180 B/op	       8 allocs/op
+BenchmarkOriginPoolLookup/4096-2       	    7514	     45179 ns/op	    1048 B/op	       8 allocs/op
+PASS
+ok  	github.com/TeaOSLab/EdgeNode/internal/nodes	5.047s

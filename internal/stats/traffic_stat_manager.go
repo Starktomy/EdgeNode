@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,7 +22,6 @@ import (
 	"github.com/TeaOSLab/EdgeNode/internal/utils/goman"
 	"github.com/iwind/TeaGo/Tea"
 	"github.com/iwind/TeaGo/maps"
-	"github.com/iwind/TeaGo/types"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -53,10 +51,20 @@ func (this *TrafficItem) Add(anotherItem *TrafficItem) {
 	this.AttackBytes += anotherItem.AttackBytes
 }
 
+type trafficBucketKey struct {
+	timestamp int64
+	serverID  int64
+}
+
+type trafficDomainKey struct {
+	timestamp int64
+	domain    string
+}
+
 // TrafficStatManager 区域流量统计
 type TrafficStatManager struct {
-	itemMap    map[string]*TrafficItem           // [timestamp serverId] => *TrafficItem
-	domainsMap map[int64]map[string]*TrafficItem // serverIde =>  { timestamp @ domain => *TrafficItem }
+	itemMap    map[trafficBucketKey]*TrafficItem
+	domainsMap map[int64]map[trafficDomainKey]*TrafficItem // serverID => timestamp/domain => item
 
 	batchSpool   *delivery.Spool
 	uploadLocker sync.Mutex
@@ -79,8 +87,8 @@ func (this *TrafficStatManager) DroppedDomainSamples() uint64 {
 // NewTrafficStatManager 获取新对象
 func NewTrafficStatManager() *TrafficStatManager {
 	var manager = &TrafficStatManager{
-		itemMap:    map[string]*TrafficItem{},
-		domainsMap: map[int64]map[string]*TrafficItem{},
+		itemMap:    map[trafficBucketKey]*TrafficItem{},
+		domainsMap: map[int64]map[trafficDomainKey]*TrafficItem{},
 		batchSpool: delivery.NewSpool(filepath.Join(Tea.Root, "data", "spool", "traffic"), 256<<20, 16<<20),
 	}
 
@@ -142,7 +150,7 @@ func (this *TrafficStatManager) Add(userId int64, serverId int64, domain string,
 	this.totalRequests.Add(1)
 
 	var timestamp = fasttime.Now().UnixFloor(300)
-	var key = strconv.FormatInt(timestamp, 10) + strconv.FormatInt(serverId, 10)
+	var key = trafficBucketKey{timestamp: timestamp, serverID: serverId}
 	this.locker.Lock()
 
 	// 总的流量
@@ -164,10 +172,10 @@ func (this *TrafficStatManager) Add(userId int64, serverId int64, domain string,
 
 	// 单个域名流量
 	if len(domain) < 128 {
-		var domainKey = types.String(timestamp) + "@" + domain
+		var domainKey = trafficDomainKey{timestamp: timestamp, domain: domain}
 		serverDomainMap, ok := this.domainsMap[serverId]
 		if !ok {
-			serverDomainMap = map[string]*TrafficItem{}
+			serverDomainMap = map[trafficDomainKey]*TrafficItem{}
 			this.domainsMap[serverId] = serverDomainMap
 		}
 
@@ -182,6 +190,9 @@ func (this *TrafficStatManager) Add(userId int64, serverId int64, domain string,
 				return
 			}
 			domainItem = &TrafficItem{}
+			// Copy only a new retained key: a request's Host can be a substring
+			// backed by a much larger request buffer.
+			domainKey.domain = strings.Clone(domain)
 			serverDomainMap[domainKey] = domainItem
 		}
 		domainItem.Bytes += bytes
@@ -214,8 +225,8 @@ func (this *TrafficStatManager) Upload() error {
 	var domainMap = this.domainsMap
 
 	// reset
-	this.itemMap = map[string]*TrafficItem{}
-	this.domainsMap = map[int64]map[string]*TrafficItem{}
+	this.itemMap = map[trafficBucketKey]*TrafficItem{}
+	this.domainsMap = map[int64]map[trafficDomainKey]*TrafficItem{}
 
 	this.locker.Unlock()
 
@@ -232,8 +243,11 @@ func (this *TrafficStatManager) Upload() error {
 				}
 			}
 			for serverID, domains := range domainMap {
+				if len(domains) == 0 {
+					continue
+				}
 				if this.domainsMap[serverID] == nil {
-					this.domainsMap[serverID] = map[string]*TrafficItem{}
+					this.domainsMap[serverID] = map[trafficDomainKey]*TrafficItem{}
 				}
 				for key, item := range domains {
 					if current := this.domainsMap[serverID][key]; current != nil {
@@ -281,23 +295,12 @@ func (this *TrafficStatManager) Upload() error {
 		return nil
 	}
 	for key, item := range itemMap {
-		if len(key) <= 10 {
-			return errors.New("invalid traffic statistics key")
-		}
-		timestamp, err := strconv.ParseInt(key[:10], 10, 64)
-		if err != nil {
-			return err
-		}
-		serverID, err := strconv.ParseInt(key[10:], 10, 64)
-		if err != nil {
-			return err
-		}
 		stat := &pb.ServerDailyStat{
-			UserId: item.UserId, ServerId: serverID, NodeRegionId: regionId,
+			UserId: item.UserId, ServerId: key.serverID, NodeRegionId: regionId,
 			Bytes: item.Bytes, CachedBytes: item.CachedBytes,
 			CountRequests: item.CountRequests, CountCachedRequests: item.CountCachedRequests,
 			CountAttackRequests: item.CountAttackRequests, AttackBytes: item.AttackBytes,
-			CheckTrafficLimiting: item.CheckingTrafficLimit, PlanId: item.PlanId, CreatedAt: timestamp,
+			CheckTrafficLimiting: item.CheckingTrafficLimit, PlanId: item.PlanId, CreatedAt: key.timestamp,
 		}
 		if err := admit(proto.Size(stat)); err != nil {
 			return errors.Join(sendErr, err)
@@ -310,7 +313,7 @@ func (this *TrafficStatManager) Upload() error {
 	// the separate server totals above remain complete for billing.
 	const maxDomainsPerServer = 20
 	for serverID, domains := range domainMap {
-		keys := make([]string, 0, len(domains))
+		keys := make([]trafficDomainKey, 0, len(domains))
 		for key := range domains {
 			keys = append(keys, key)
 		}
@@ -323,15 +326,11 @@ func (this *TrafficStatManager) Upload() error {
 		}
 		for _, key := range keys {
 			item := domains[key]
-			parts := strings.SplitN(key, "@", 2)
-			if len(parts) != 2 {
-				return errors.New("invalid domain statistics key")
-			}
 			stat := &pb.UploadServerDailyStatsRequest_DomainStat{
-				ServerId: serverID, Domain: parts[1], Bytes: item.Bytes,
+				ServerId: serverID, Domain: key.domain, Bytes: item.Bytes,
 				CachedBytes: item.CachedBytes, CountRequests: item.CountRequests,
 				CountCachedRequests: item.CountCachedRequests, CountAttackRequests: item.CountAttackRequests,
-				AttackBytes: item.AttackBytes, CreatedAt: types.Int64(parts[0]),
+				AttackBytes: item.AttackBytes, CreatedAt: key.timestamp,
 			}
 			if stat.CachedBytes > stat.Bytes || stat.CountCachedRequests == stat.CountRequests {
 				stat.CachedBytes = stat.Bytes
@@ -350,19 +349,20 @@ func (this *TrafficStatManager) Upload() error {
 }
 
 func (this *TrafficStatManager) sendPending() error {
-	batches, err := this.batchSpool.Pending()
-	if err != nil || len(batches) == 0 {
-		return err
-	}
-	for _, batch := range batches {
+	return this.batchSpool.WalkPending(func(batch delivery.Batch) error {
 		var request pb.UploadServerDailyStatsRequest
-		if err := proto.Unmarshal(batch.Data, &request); err != nil {
+		decodeErr := delivery.ValidateBatchRecords(batch.Data, request.ProtoReflect().Descriptor(), 1, 2)
+		if decodeErr == nil {
+			decodeErr = (proto.UnmarshalOptions{RecursionLimit: delivery.MaxBatchDepth}).Unmarshal(batch.Data, &request)
+		}
+		if err := decodeErr; err != nil {
 			if isolateErr := this.batchSpool.Quarantine(batch.ID, "invalid traffic protobuf: "+err.Error()); isolateErr != nil {
 				return errors.Join(err, isolateErr)
 			}
 			remotelogs.Error("TRAFFIC_STAT_MANAGER", fmt.Sprintf("quarantined corrupt traffic batch %s: %v", batch.ID, err))
-			continue
+			return nil
 		}
+		var err error
 		if this.sendBatch != nil {
 			err = this.sendBatch(context.Background(), batch.ID, &request)
 		} else {
@@ -382,13 +382,10 @@ func (this *TrafficStatManager) sendPending() error {
 					return errors.Join(err, isolateErr)
 				}
 				remotelogs.Error("TRAFFIC_STAT_MANAGER", fmt.Sprintf("traffic batch %s requires operator review: %v", batch.ID, err))
-				continue
+				return nil
 			}
 			return err
 		}
-		if err := this.batchSpool.Ack(batch.ID); err != nil {
-			return err
-		}
-	}
-	return nil
+		return this.batchSpool.Ack(batch.ID)
+	})
 }

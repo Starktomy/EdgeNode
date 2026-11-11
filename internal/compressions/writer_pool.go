@@ -4,6 +4,7 @@ package compressions
 
 import (
 	"io"
+	"sync/atomic"
 	"time"
 
 	teaconst "github.com/TeaOSLab/EdgeNode/internal/const"
@@ -12,7 +13,7 @@ import (
 
 const maxWriterHits = 1 << 20
 
-var isBusy = false
+var isBusy atomic.Bool
 
 func init() {
 	if !teaconst.IsMain {
@@ -21,16 +22,15 @@ func init() {
 
 	goman.New(func() {
 		var ticker = time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
 		for range ticker.C {
-			if isBusy {
-				isBusy = false
-			}
+			isBusy.Store(false)
 		}
 	})
 }
 
 func IsBusy() bool {
-	return isBusy
+	return isBusy.Load()
 }
 
 type WriterPool struct {
@@ -50,7 +50,7 @@ func NewWriterPool(maxSize int, newFunc func(writer io.Writer, level int) (Write
 }
 
 func (this *WriterPool) Get(parentWriter io.Writer, level int) (Writer, error) {
-	if isBusy {
+	if isBusy.Load() {
 		return nil, ErrIsBusy
 	}
 
@@ -78,6 +78,6 @@ func (this *WriterPool) Put(writer Writer) {
 	select {
 	case this.c <- writer:
 	default:
-		isBusy = true
+		isBusy.Store(true)
 	}
 }

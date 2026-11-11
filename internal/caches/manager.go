@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/TeaOSLab/EdgeCommon/pkg/serverconfigs"
 	"github.com/TeaOSLab/EdgeCommon/pkg/serverconfigs/shared"
@@ -40,9 +41,10 @@ type Manager struct {
 	CountFileStorages   int
 	CountMemoryStorages int
 
-	policyMap  map[int64]*serverconfigs.HTTPCachePolicy // policyId => []*Policy
-	storageMap map[int64]StorageInterface               // policyId => *Storage
-	locker     sync.RWMutex
+	policyMap          map[int64]*serverconfigs.HTTPCachePolicy // policyId => []*Policy
+	storageMap         map[int64]StorageInterface               // policyId => *Storage
+	locker             sync.RWMutex
+	memoryStorageCount atomic.Int64
 }
 
 // NewManager 获取管理器对象
@@ -149,15 +151,25 @@ func (this *Manager) UpdatePolicies(newPolicies []*serverconfigs.HTTPCachePolicy
 		}
 	}
 
+	this.refreshStorageCounts()
+}
+
+// Called with locker held, after storage initialization and policy updates.
+func (this *Manager) refreshStorageCounts() {
 	this.CountFileStorages = 0
 	this.CountMemoryStorages = 0
 	for _, storage := range this.storageMap {
-		_, isFileStorage := storage.(*FileStorage)
-		this.CountMemoryStorages++
-		if isFileStorage {
+		switch typed := storage.(type) {
+		case *FileStorage:
 			this.CountFileStorages++
+			if typed.memoryStorage != nil {
+				this.CountMemoryStorages++
+			}
+		case *MemoryStorage:
+			this.CountMemoryStorages++
 		}
 	}
+	this.memoryStorageCount.Store(int64(this.CountMemoryStorages))
 }
 
 // FindPolicy 获取Policy信息
@@ -295,14 +307,20 @@ func (this *Manager) ScanGarbageCaches(callback func(path string) error) error {
 
 // MaxSystemMemoryBytesPerStorage 计算单个策略能使用的系统最大内存
 func (this *Manager) MaxSystemMemoryBytesPerStorage() int64 {
-	var count = this.CountMemoryStorages
+	return memoryStorageBudget(memutils.SystemMemoryBytes(), this.memoryStorageCount.Load())
+}
+
+func memoryStorageBudget(totalBytes uint64, count int64) int64 {
 	if count < 1 {
 		count = 1
 	}
 
-	var resultBytes = int64(memutils.SystemMemoryBytes()) / 3 / int64(count) // 1/3 of the system memory
-	if resultBytes < 1<<30 {
-		resultBytes = 1 << 30
+	// Share a third of the effective process memory across payload caches.
+	// A 1 GiB minimum per storage used to exceed small container limits before
+	// accounting for request bodies, indexes, queues and native allocations.
+	resultBytes := totalBytes / 3 / uint64(count)
+	if resultBytes > 1<<63-1 {
+		return 1<<63 - 1
 	}
-	return resultBytes
+	return max(int64(resultBytes), 1)
 }

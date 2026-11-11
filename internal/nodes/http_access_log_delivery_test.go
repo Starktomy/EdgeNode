@@ -1,10 +1,13 @@
 package nodes
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,6 +18,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -297,5 +301,159 @@ func TestPermanentAccessLogFailureIsQuarantinedAndNextBatchSends(t *testing.T) {
 	pending, err := queue.spool.Pending()
 	if err != nil || len(pending) != 0 {
 		t.Fatal("sender did not progress", err)
+	}
+}
+
+func TestAccessLogStreamingSendCancelsContextsAndRetainsFailedIdentity(t *testing.T) {
+	queue := deliveryQueue(t, 1<<20)
+	identities := make(map[string]string)
+	for _, requestID := range []string{"first", "second", "third"} {
+		payload, err := proto.Marshal(&pb.CreateHTTPAccessLogsRequest{HttpAccessLogs: []*pb.HTTPAccessLog{{RequestId: requestID}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := queue.spool.Append(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		identities[id] = requestID
+	}
+	var previous context.Context
+	var sentID, failedID string
+	var calls int
+	queue.sendBatch = func(ctx context.Context, req *pb.CreateHTTPAccessLogsRequest) error {
+		if previous != nil && !errors.Is(previous.Err(), context.Canceled) {
+			t.Fatal("previous RPC deadline remained live while the next batch started")
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 11*time.Second {
+			t.Fatal("streaming send lost the per-batch RPC deadline")
+		}
+		previous = ctx
+		md, ok := metadata.FromOutgoingContext(ctx)
+		ids := md.Get("x-edge-access-log-batch")
+		if !ok || len(ids) != 1 || identities[ids[0]] != req.HttpAccessLogs[0].RequestId {
+			t.Fatal("streaming send changed the original disk identity", ids)
+		}
+		calls++
+		switch calls {
+		case 1:
+			sentID = ids[0]
+		case 2:
+			failedID = ids[0]
+			return status.Error(codes.Unavailable, "response lost after server commit")
+		case 3:
+			if ids[0] != failedID {
+				t.Fatal("retry changed the failed batch identity")
+			}
+		}
+		return nil
+	}
+	if err := queue.loop(); status.Code(err) != codes.Unavailable || calls != 2 {
+		t.Fatalf("failed send continued past the retry boundary: %d calls, %v", calls, err)
+	}
+	if !errors.Is(previous.Err(), context.Canceled) {
+		t.Fatal("failed send did not cancel its RPC context")
+	}
+	pending, err := queue.spool.Pending()
+	if err != nil || len(pending) != 2 {
+		t.Fatal("failed or unvisited batches were acknowledged", err)
+	}
+	for _, batch := range pending {
+		if batch.ID == sentID {
+			t.Fatal("successful send was not acknowledged")
+		}
+	}
+	if err := queue.loop(); err != nil || calls != 4 {
+		t.Fatalf("retry did not drain remaining original batches: %d calls, %v", calls, err)
+	}
+	if !errors.Is(previous.Err(), context.Canceled) {
+		t.Fatal("last successful send did not cancel its RPC context")
+	}
+	if pending, err := queue.spool.Pending(); err != nil || len(pending) != 0 {
+		t.Fatal("acknowledged streaming batches remained pending", err)
+	}
+}
+
+func TestAccessLogRestoredDecodeBudgetsQuarantineBeforeSending(t *testing.T) {
+	encodeMessage := func(field protowire.Number, data []byte) []byte {
+		return protowire.AppendBytes(protowire.AppendTag(nil, field, protowire.BytesType), data)
+	}
+	cases := []struct {
+		name   string
+		data   []byte
+		reason string
+	}{
+		{"records", bytes.Repeat(encodeMessage(1, nil), delivery.MaxBatchRecords+1), "2000 records"},
+		{"nested tags", encodeMessage(1, bytes.Repeat(encodeMessage(50, nil), delivery.MaxBatchElements)), "131072 repeated elements"},
+		{"malformed inner record", encodeMessage(1, []byte{0}), "wire format"},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			dir := t.TempDir()
+			queue := deliveryQueue(t, 1<<20)
+			queue.spool = delivery.NewSpool(dir, 1<<20, 8<<20)
+			badID, err := queue.spool.Append(item.data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := proto.Marshal(&pb.CreateHTTPAccessLogsRequest{HttpAccessLogs: []*pb.HTTPAccessLog{{RequestId: "good"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			goodID, err := queue.spool.Append(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var calls int
+			queue.sendBatch = func(ctx context.Context, req *pb.CreateHTTPAccessLogsRequest) error {
+				md, _ := metadata.FromOutgoingContext(ctx)
+				ids := md.Get("x-edge-access-log-batch")
+				if len(ids) != 1 || ids[0] != goodID || len(req.HttpAccessLogs) != 1 || req.HttpAccessLogs[0].RequestId != "good" {
+					t.Fatal("over-budget restored log reached RPC")
+				}
+				calls++
+				return nil
+			}
+			if err := queue.loop(); err != nil || calls != 1 || queue.Quarantined() != 1 {
+				t.Fatalf("poison batch blocked valid logs: calls=%d, %v", calls, err)
+			}
+			if data, err := os.ReadFile(filepath.Join(dir, "quarantine", badID+".batch")); err != nil || !bytes.Equal(data, item.data) {
+				t.Fatal("decode isolation lost the original disk identity or payload", err)
+			}
+			if reason, err := os.ReadFile(filepath.Join(dir, "quarantine", badID+".reason.json")); err != nil || !bytes.Contains(reason, []byte(item.reason)) {
+				t.Fatal("decode isolation lost the failure diagnosis", err)
+			}
+		})
+	}
+}
+
+func TestAccessLogDecodeBudgetFullQuarantineRetainsOriginalIdentity(t *testing.T) {
+	dir := t.TempDir()
+	queue := deliveryQueue(t, 1<<20)
+	queue.spool = delivery.NewSpool(dir, 1<<20, 8<<20)
+	poison := bytes.Repeat([]byte{0x0a, 0}, delivery.MaxBatchRecords+1)
+	id, err := queue.spool.Append(poison)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := filepath.Join(dir, "quarantine")
+	if err := os.Mkdir(dead, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 128; i++ {
+		if err := os.WriteFile(filepath.Join(dead, fmt.Sprint(i)), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	queue.sendBatch = func(context.Context, *pb.CreateHTTPAccessLogsRequest) error {
+		t.Fatal("over-budget restored logs reached RPC")
+		return nil
+	}
+	if err := queue.loop(); err == nil {
+		t.Fatal("full quarantine was hidden")
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, id+".batch")); err != nil || !bytes.Equal(data, poison) {
+		t.Fatal("full quarantine discarded original log identity", err)
 	}
 }

@@ -975,14 +975,8 @@ func (this *Node) onReload(config *nodeconfigs.NodeConfig, reloadAll bool) error
 
 		// max cpu
 		if config.MaxCPU != this.oldMaxCPU {
-			if config.MaxCPU > 0 && config.MaxCPU < int32(runtime.NumCPU()) {
-				runtime.GOMAXPROCS(int(config.MaxCPU))
-				remotelogs.Println("NODE", "[CPU]set max cpu to '"+types.String(config.MaxCPU)+"'")
-			} else {
-				var threads = runtime.NumCPU()
-				runtime.GOMAXPROCS(threads)
-				remotelogs.Println("NODE", "[CPU]set max cpu to '"+types.String(threads)+"'")
-			}
+			var threads = configureMaxCPU(config.MaxCPU)
+			remotelogs.Println("NODE", "[CPU]set max cpu to '"+types.String(threads)+"'")
 
 			this.oldMaxCPU = config.MaxCPU
 		}

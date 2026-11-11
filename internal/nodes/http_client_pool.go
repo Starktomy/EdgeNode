@@ -23,6 +23,7 @@ var SharedHTTPClientPool = NewHTTPClientPool()
 const httpClientProxyProtocolTag = "@ProxyProtocol@"
 const maxHTTPRedirects = 8
 const defaultMaxHTTPClients = 4096
+const httpClientEvictionSample = 16
 
 // HTTPClientPool 客户端池
 type HTTPClientPool struct {
@@ -113,8 +114,14 @@ func (this *HTTPClientPool) Client(req *HTTPRequest,
 	}
 
 	// 这里不能使用RLock，避免因为并发生成多个同样的client实例
+	var evicted *HTTPClient
 	this.locker.Lock()
-	defer this.locker.Unlock()
+	defer func() {
+		this.locker.Unlock()
+		if evicted != nil {
+			evicted.Close()
+		}
+	}()
 
 	// 再次查找
 	client, found = this.clientsMap[key]
@@ -129,14 +136,26 @@ func (this *HTTPClientPool) Client(req *HTTPRequest,
 	if len(this.clientsMap) >= this.maxClients {
 		var oldestKey uint64
 		var oldest *HTTPClient
+		var oldestAccess int64
+		var inspected int
+		// Go map iteration starts at an arbitrary position. Sample a bounded
+		// number of clients so origin churn never scans the whole registry
+		// while holding its write lock. Periodic cleanup still expires idle
+		// entries independently of this approximate-recency eviction.
 		for candidateKey, candidate := range this.clientsMap {
-			if oldest == nil || candidate.AccessTime() < oldest.AccessTime() {
+			access := candidate.AccessTime()
+			if oldest == nil || access < oldestAccess {
 				oldestKey, oldest = candidateKey, candidate
+				oldestAccess = access
+			}
+			inspected++
+			if inspected >= httpClientEvictionSample {
+				break
 			}
 		}
 		if oldest != nil {
 			delete(this.clientsMap, oldestKey)
-			oldest.Close()
+			evicted = oldest
 		}
 	}
 
@@ -163,8 +182,9 @@ func (this *HTTPClientPool) Client(req *HTTPRequest,
 		maxConnections = numberCPU * 64
 	}
 
-	if idleConns <= 0 {
-		idleConns = numberCPU * 16
+	var defaultIdleConns = idleConns <= 0
+	if defaultIdleConns {
+		idleConns = min(max(runtime.GOMAXPROCS(0), 1), 8) * 16
 	}
 
 	if isProxyProtocol { // ProxyProtocol无需保持太多空闲连接
@@ -177,6 +197,9 @@ func (this *HTTPClientPool) Client(req *HTTPRequest,
 		// Ln节点可以适当增加连接数
 		maxConnections *= 2
 		idleConns *= 2
+	}
+	if defaultIdleConns {
+		idleConns = min(idleConns, 128)
 	}
 
 	// TLS通讯

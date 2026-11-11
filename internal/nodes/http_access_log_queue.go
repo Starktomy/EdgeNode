@@ -47,10 +47,11 @@ type HTTPAccessLogQueue struct {
 
 	// Only the persistence goroutine owns these fields. Bytes remain charged to
 	// queuedBytes until the exact batch identity has been published on disk.
-	pendingPayload []byte
-	pendingBytes   int64
-	carryLog       *pb.HTTPAccessLog
-	sendBatch      func(context.Context, *pb.CreateHTTPAccessLogsRequest) error
+	pendingPayload   []byte
+	pendingBytes     int64
+	pendingValidated bool
+	carryLog         *pb.HTTPAccessLog
+	sendBatch        func(context.Context, *pb.CreateHTTPAccessLogsRequest) error
 }
 
 // NewHTTPAccessLogQueue 获取新对象
@@ -193,6 +194,10 @@ func (this *HTTPAccessLogQueue) Push(accessLog *pb.HTTPAccessLog) {
 	if accessLog == nil {
 		return
 	}
+	if _, err := accessLogElementCount(accessLog); err != nil {
+		this.dropped.Add(1)
+		return
+	}
 	size := int64(proto.Size(accessLog))
 	if size > accessLogBatchBytes-8 || this.queuedBytes.Add(size) > accessLogQueueBytes {
 		if size <= accessLogBatchBytes-8 {
@@ -221,9 +226,10 @@ func (this *HTTPAccessLogQueue) persistBatch() error {
 	if len(this.pendingPayload) == 0 {
 		var logs []*pb.HTTPAccessLog
 		var size int
+		var elements int
 		var charged int64
 	Drain:
-		for len(logs) < 2000 {
+		for len(logs) < delivery.MaxBatchRecords {
 			var log *pb.HTTPAccessLog
 			if this.carryLog != nil {
 				log = this.carryLog
@@ -235,9 +241,19 @@ func (this *HTTPAccessLogQueue) persistBatch() error {
 					break Drain
 				}
 			}
+			entryElements, err := accessLogElementCount(log)
+			if err != nil {
+				// An admitted object changed or a newer schema needs an updated
+				// producer budget. Keep it charged in RAM and report the failure.
+				this.carryLog = log
+				if len(logs) > 0 {
+					break Drain // Publish earlier admitted entries before retrying it.
+				}
+				return err
+			}
 			entrySize := proto.Size(log)
 			// Each repeated message also carries a tag and length prefix.
-			if len(logs) > 0 && size+entrySize+8 > accessLogBatchBytes {
+			if len(logs) > 0 && (size+entrySize+8 > accessLogBatchBytes || elements+entryElements > delivery.MaxBatchElements) {
 				this.carryLog = log
 				break
 			}
@@ -245,6 +261,7 @@ func (this *HTTPAccessLogQueue) persistBatch() error {
 			this.showLocalLog(log)
 			logs = append(logs, log)
 			size += entrySize + 8
+			elements += entryElements
 			charged += int64(entrySize)
 		}
 		if len(logs) == 0 {
@@ -259,11 +276,19 @@ func (this *HTTPAccessLogQueue) persistBatch() error {
 		this.pendingPayload = payload
 		this.pendingBytes = charged
 	}
+	if !this.pendingValidated {
+		var request pb.CreateHTTPAccessLogsRequest
+		if err := delivery.ValidateBatchRecords(this.pendingPayload, request.ProtoReflect().Descriptor(), 1); err != nil {
+			return err // Retain the payload and its RAM charge; never publish it.
+		}
+		this.pendingValidated = true
+	}
 	id, err := this.spool.Append(this.pendingPayload)
 	if id != "" {
 		this.queuedBytes.Add(-this.pendingBytes)
 		this.pendingPayload = nil
 		this.pendingBytes = 0
+		this.pendingValidated = false
 	}
 	return err
 }
@@ -296,26 +321,25 @@ func (this *HTTPAccessLogQueue) ViewerDropped() uint64 { return this.viewerDropp
 // loop sends only already-published batches. Its network deadline cannot stop
 // the independent producer from draining more logs into the disk budget.
 func (this *HTTPAccessLogQueue) loop() error {
-	batches, err := this.spool.Pending()
-	if err != nil || len(batches) == 0 {
-		return err
-	}
-
-	if this.rpcClient == nil && this.sendBatch == nil {
-		client, err := rpc.SharedRPC()
-		if err != nil {
-			return err
+	return this.spool.WalkPending(func(batch delivery.Batch) error {
+		if this.rpcClient == nil && this.sendBatch == nil {
+			client, err := rpc.SharedRPC()
+			if err != nil {
+				return err
+			}
+			this.rpcClient = client
 		}
-		this.rpcClient = client
-	}
-	for _, batch := range batches {
 		var request pb.CreateHTTPAccessLogsRequest
-		if err := proto.Unmarshal(batch.Data, &request); err != nil {
+		decodeErr := delivery.ValidateBatchRecords(batch.Data, request.ProtoReflect().Descriptor(), 1)
+		if decodeErr == nil {
+			decodeErr = (proto.UnmarshalOptions{RecursionLimit: delivery.MaxBatchDepth}).Unmarshal(batch.Data, &request)
+		}
+		if err := decodeErr; err != nil {
 			if quarantineErr := this.spool.Quarantine(batch.ID, "invalid protobuf payload: "+err.Error()); quarantineErr != nil {
 				return errors.Join(err, quarantineErr)
 			}
 			remotelogs.Error("ACCESS_LOG_QUARANTINE", "isolated batch "+batch.ID+": "+err.Error())
-			continue
+			return nil
 		}
 		base := context.Background()
 		if this.rpcClient != nil {
@@ -323,6 +347,7 @@ func (this *HTTPAccessLogQueue) loop() error {
 		}
 		ctx, cancel := context.WithTimeout(base, 10*time.Second)
 		ctx = metadata.AppendToOutgoingContext(ctx, "x-edge-access-log-batch", batch.ID)
+		var err error
 		if this.sendBatch != nil {
 			err = this.sendBatch(ctx, &request)
 		} else {
@@ -336,16 +361,13 @@ func (this *HTTPAccessLogQueue) loop() error {
 					return errors.Join(err, quarantineErr)
 				}
 				remotelogs.Error("ACCESS_LOG_QUARANTINE", "isolated batch "+batch.ID+": "+err.Error())
-				continue
+				return nil
 			default:
 				return err
 			}
 		}
-		if err := this.spool.Ack(batch.ID); err != nil {
-			return err
-		}
-	}
-	return nil
+		return this.spool.Ack(batch.ID)
+	})
 }
 
 // ToValidUTF8 处理访问日志中的非UTF-8字节

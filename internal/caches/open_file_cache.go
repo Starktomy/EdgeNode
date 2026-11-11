@@ -33,6 +33,7 @@ type OpenFileCache struct {
 
 	count    int
 	usedSize int64
+	isClosed bool
 }
 
 func NewOpenFileCache(maxCount int) (*OpenFileCache, error) {
@@ -47,7 +48,7 @@ func NewOpenFileCache(maxCount int) (*OpenFileCache, error) {
 		maxCount:     maxCount,
 		poolMap:      map[string]*OpenFilePool{},
 		poolList:     linkedlist.NewList[*OpenFilePool](),
-		capacitySize: (int64(memutils.SystemMemoryGB()) << 30) / 16,
+		capacitySize: int64(memutils.SystemMemoryBytes() / 16),
 	}
 
 	watcher, err := fsnotify.NewWatcher()
@@ -77,8 +78,12 @@ func (this *OpenFileCache) Get(filename string) *OpenFile {
 		file, consumed, consumedSize := pool.Get()
 		if consumed {
 			this.locker.Lock()
-			this.count--
-			this.usedSize -= consumedSize
+			// CloseAll resets accounting and permanently closes the cache.
+			// A reader that popped just before shutdown still owns its file.
+			if !this.isClosed {
+				this.count--
+				this.usedSize -= consumedSize
+			}
 
 			// pool如果为空，也不需要从列表中删除，避免put时需要重新创建
 
@@ -90,19 +95,26 @@ func (this *OpenFileCache) Get(filename string) *OpenFile {
 	return nil
 }
 
+// Put takes ownership of file, closing it immediately when it cannot be cached.
 func (this *OpenFileCache) Put(filename string, file *OpenFile) {
 	filename = filepath.Clean(filename)
 
 	if file.size > maxOpenFileSize {
+		_ = file.Close()
 		return
 	}
 
 	this.locker.Lock()
 	defer this.locker.Unlock()
+	if this.isClosed {
+		_ = file.Close()
+		return
+	}
 
 	// 如果超过当前容量，则关闭最早的
 	if this.count >= this.maxCount || this.usedSize+file.size >= this.capacitySize {
 		this.consumeHead()
+		_ = file.Close()
 		return
 	}
 
@@ -140,7 +152,7 @@ func (this *OpenFileCache) Close(filename string) {
 		this.poolList.Remove(pool.linkItem)
 		_ = this.watcher.Remove(filename)
 		this.count -= pool.Len()
-		this.usedSize -= pool.usedSize
+		this.usedSize -= pool.TotalSize()
 	}
 
 	this.locker.Unlock()
@@ -153,6 +165,11 @@ func (this *OpenFileCache) Close(filename string) {
 
 func (this *OpenFileCache) CloseAll() {
 	this.locker.Lock()
+	if this.isClosed {
+		this.locker.Unlock()
+		return
+	}
+	this.isClosed = true
 	for _, pool := range this.poolMap {
 		pool.Close()
 	}
@@ -165,18 +182,27 @@ func (this *OpenFileCache) CloseAll() {
 }
 
 func (this *OpenFileCache) SetCapacity(capacityBytes int64) {
+	this.locker.Lock()
+	defer this.locker.Unlock()
 	this.capacitySize = capacityBytes
 }
 
 func (this *OpenFileCache) Debug() {
 	var ticker = time.NewTicker(5 * time.Second)
 	goman.New(func() {
+		defer ticker.Stop()
 		for range ticker.C {
+			this.locker.RLock()
+			if this.isClosed {
+				this.locker.RUnlock()
+				return
+			}
 			logs.Println("==== " + types.String(this.count) + ", " + fmt.Sprintf("%.4fMB", float64(this.usedSize)/(1<<20)) + " ====")
 			this.poolList.Range(func(item *linkedlist.Item[*OpenFilePool]) (goNext bool) {
 				logs.Println(filepath.Base(item.Value.Filename()), item.Value.Len())
 				return true
 			})
+			this.locker.RUnlock()
 		}
 	})
 }

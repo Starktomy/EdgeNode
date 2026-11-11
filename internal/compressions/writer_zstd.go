@@ -23,15 +23,14 @@ func newZSTDWriter(writer io.Writer) (Writer, error) {
 	var level = 1
 	var zstdLevel = zstd.SpeedFastest
 
-	zstdWriter, err := zstd.NewWriter(writer, zstd.WithEncoderLevel(zstdLevel), zstd.WithWindowSize(16<<10), zstd.WithLowerEncoderMem(true))
+	result := &ZSTDWriter{BaseWriter: BaseWriter{parent: writer}, level: level}
+	zstdWriter, err := zstd.NewWriter(&result.BaseWriter, zstd.WithEncoderLevel(zstdLevel), zstd.WithWindowSize(16<<10), zstd.WithLowerEncoderMem(true))
 	if err != nil {
 		return nil, err
 	}
 
-	return &ZSTDWriter{
-		writer:    zstdWriter,
-		level:     level,
-	}, nil
+	result.writer = zstdWriter
+	return result, nil
 }
 
 func (this *ZSTDWriter) Write(p []byte) (int, error) {
@@ -43,7 +42,8 @@ func (this *ZSTDWriter) Flush() error {
 }
 
 func (this *ZSTDWriter) Reset(writer io.Writer) {
-	this.writer.Reset(writer)
+	this.parent = writer
+	this.writer.Reset(&this.BaseWriter)
 }
 
 func (this *ZSTDWriter) RawClose() error {

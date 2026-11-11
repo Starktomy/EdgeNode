@@ -18,7 +18,9 @@ func NewDeflateReader(reader io.Reader) (Reader, error) {
 }
 
 func newDeflateReader(reader io.Reader) (Reader, error) {
-	return &DeflateReader{reader: flate.NewReader(reader)}, nil
+	result := &DeflateReader{BaseReader: BaseReader{parent: reader}}
+	result.reader = flate.NewReader(result.input())
+	return result, nil
 }
 
 func (this *DeflateReader) Read(p []byte) (n int, err error) {
@@ -26,8 +28,10 @@ func (this *DeflateReader) Read(p []byte) (n int, err error) {
 }
 
 func (this *DeflateReader) Reset(reader io.Reader) error {
-	this.reader = flate.NewReader(reader)
-	return nil
+	this.parent = reader
+	// NewReader guarantees Resetter. Keep its buffers across pooled uses;
+	// constructing another decoder here allocated about 40 KiB per request.
+	return this.reader.(flate.Resetter).Reset(this.input(), nil)
 }
 
 func (this *DeflateReader) RawClose() error {

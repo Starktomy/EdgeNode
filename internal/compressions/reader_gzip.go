@@ -19,13 +19,13 @@ func NewGzipReader(reader io.Reader) (Reader, error) {
 }
 
 func newGzipReader(reader io.Reader) (Reader, error) {
-	r, err := gzip.NewReader(reader)
+	result := &GzipReader{BaseReader: BaseReader{parent: reader}}
+	r, err := gzip.NewReader(result.input())
 	if err != nil {
 		return nil, err
 	}
-	return &GzipReader{
-		reader: r,
-	}, nil
+	result.reader = r
+	return result, nil
 }
 
 func (this *GzipReader) Read(p []byte) (n int, err error) {
@@ -33,7 +33,8 @@ func (this *GzipReader) Read(p []byte) (n int, err error) {
 }
 
 func (this *GzipReader) Reset(reader io.Reader) error {
-	return this.reader.Reset(reader)
+	this.parent = reader
+	return this.reader.Reset(this.input())
 }
 
 func (this *GzipReader) RawClose() error {

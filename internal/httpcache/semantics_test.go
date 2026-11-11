@@ -85,6 +85,37 @@ func TestCompressionPreservesOriginVary(t *testing.T) {
 	}
 }
 
+func TestSecurityVaryMatchingRetainsFieldLineAndPresenceSemantics(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		stored  http.Header
+		current http.Header
+		matches bool
+	}{
+		{"combined field lines", http.Header{"Accept-Language": {" en-US ", " en;q=0.9 "}}, http.Header{"Accept-Language": {"en-US,en;q=0.9"}}, true},
+		{"different comma boundaries", http.Header{"Accept-Language": {"a,b", "c"}}, http.Header{"Accept-Language": {"a", "b,c"}}, true},
+		{"trim surrounding whitespace", http.Header{"Accept-Language": {"en-US", "en;q=0.9"}}, http.Header{"Accept-Language": {" en-US ", " en;q=0.9 "}}, true},
+		{"absent remains absent", http.Header{}, http.Header{}, true},
+		{"empty is distinct from absent", http.Header{}, http.Header{"Accept-Language": {""}}, false},
+		{"present nil field", http.Header{"Accept-Language": nil}, http.Header{"Accept-Language": nil}, true},
+		{"present empty field", http.Header{"Accept-Language": {}}, http.Header{"Accept-Language": nil}, true},
+		{"missing previously present field", http.Header{"Accept-Language": nil}, http.Header{}, false},
+		{"different language", http.Header{"Accept-Language": {"en-US"}}, http.Header{"Accept-Language": {"zh-CN"}}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := http.Header{"Vary": {"Accept-Language"}}
+			encoded, ok := EncodeVary(response, test.stored)
+			if !ok {
+				t.Fatal("could not encode fixture")
+			}
+			response.Set(VaryMetadataHeader, encoded)
+			if MatchesVary(response, test.current) != test.matches {
+				t.Fatalf("representation match changed for %s", test.name)
+			}
+		})
+	}
+}
+
 func TestConditionalRequestsRespectETagPrecedence(t *testing.T) {
 	const modified = "Mon, 02 Jan 2006 15:04:05 GMT"
 	request := httptest.NewRequest(http.MethodGet, "https://example.test/a", nil)

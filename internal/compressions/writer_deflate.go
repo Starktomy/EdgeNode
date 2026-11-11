@@ -21,15 +21,14 @@ func NewDeflateWriter(writer io.Writer, level int) (Writer, error) {
 func newDeflateWriter(writer io.Writer) (Writer, error) {
 	var level = GenerateCompressLevel(flate.BestSpeed, flate.BestCompression)
 
-	flateWriter, err := flate.NewWriter(writer, level)
+	result := &DeflateWriter{BaseWriter: BaseWriter{parent: writer}, level: level}
+	flateWriter, err := flate.NewWriter(&result.BaseWriter, level)
 	if err != nil {
 		return nil, err
 	}
 
-	return &DeflateWriter{
-		writer: flateWriter,
-		level:  level,
-	}, nil
+	result.writer = flateWriter
+	return result, nil
 }
 
 func (this *DeflateWriter) Write(p []byte) (int, error) {
@@ -41,7 +40,8 @@ func (this *DeflateWriter) Flush() error {
 }
 
 func (this *DeflateWriter) Reset(writer io.Writer) {
-	this.writer.Reset(writer)
+	this.parent = writer
+	this.writer.Reset(&this.BaseWriter)
 }
 
 func (this *DeflateWriter) RawClose() error {

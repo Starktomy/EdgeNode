@@ -1,0 +1,9 @@
+goos: linux
+goarch: amd64
+pkg: github.com/TeaOSLab/EdgeNode/internal/compressions
+cpu: AMD EPYC 7643 48-Core Processor                
+BenchmarkReviewCompressionReadReuse/deflate-5         	   33650	     18191 ns/op	   40551 B/op	       4 allocs/op
+BenchmarkReviewCompressionReadReuse/deflate-5         	   35618	     18797 ns/op	   40551 B/op	       4 allocs/op
+BenchmarkReviewCompressionReadReuse/deflate-5         	   38451	     16710 ns/op	   40544 B/op	       4 allocs/op
+PASS
+ok  	github.com/TeaOSLab/EdgeNode/internal/compressions	1.937s

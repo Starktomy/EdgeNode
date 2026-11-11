@@ -1,0 +1,18 @@
+goos: linux
+goarch: amd64
+pkg: github.com/TeaOSLab/EdgeNode/internal/compressions
+cpu: AMD EPYC 7643 48-Core Processor                
+BenchmarkReviewCompressionReadReuse/gzip-5         	   57367	     10316 ns/op	       0 B/op	       0 allocs/op
+BenchmarkReviewCompressionReadReuse/gzip-5         	   55471	     10283 ns/op	       0 B/op	       0 allocs/op
+BenchmarkReviewCompressionReadReuse/gzip-5         	   59691	     10057 ns/op	       0 B/op	       0 allocs/op
+BenchmarkReviewCompressionReadReuse/deflate-5      	   75612	      8258 ns/op	       0 B/op	       0 allocs/op
+BenchmarkReviewCompressionReadReuse/deflate-5      	   75846	      7482 ns/op	       0 B/op	       0 allocs/op
+BenchmarkReviewCompressionReadReuse/deflate-5      	   81414	      7574 ns/op	       0 B/op	       0 allocs/op
+BenchmarkReviewCompressionReadReuse/brotli-5       	   10000	     58446 ns/op	     144 B/op	       6 allocs/op
+BenchmarkReviewCompressionReadReuse/brotli-5       	   10000	     56777 ns/op	     144 B/op	       6 allocs/op
+BenchmarkReviewCompressionReadReuse/brotli-5       	   10324	     58184 ns/op	     144 B/op	       6 allocs/op
+BenchmarkReviewCompressionReadReuse/zstd-5         	    7878	     69820 ns/op	  101239 B/op	      41 allocs/op
+BenchmarkReviewCompressionReadReuse/zstd-5         	    9338	     69292 ns/op	  101254 B/op	      41 allocs/op
+BenchmarkReviewCompressionReadReuse/zstd-5         	    8473	     70788 ns/op	  101260 B/op	      41 allocs/op
+PASS
+ok  	github.com/TeaOSLab/EdgeNode/internal/compressions	7.141s

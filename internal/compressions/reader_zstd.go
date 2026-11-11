@@ -29,18 +29,30 @@ func newZSTDReader(reader io.Reader) (Reader, error) {
 }
 
 func (this *ZSTDReader) Read(p []byte) (n int, err error) {
+	if this.reader == nil {
+		return 0, zstd.ErrDecoderClosed
+	}
 	return this.reader.Read(p)
 }
 
 func (this *ZSTDReader) Reset(reader io.Reader) error {
+	if this.reader == nil {
+		return zstd.ErrDecoderClosed
+	}
 	return this.reader.Reset(reader)
 }
 
 func (this *ZSTDReader) RawClose() error {
-	this.reader.Close()
+	if this.reader != nil {
+		this.reader.Close()
+		this.reader = nil
+	}
 	return nil
 }
 
 func (this *ZSTDReader) Close() error {
+	// Decoder.Close destroys its resources and Reset cannot revive it. Do not
+	// cache a closed decoder only to discard/recreate it at the next Get.
+	this.pool = nil
 	return this.Finish(this)
 }

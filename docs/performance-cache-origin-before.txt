@@ -1,0 +1,50 @@
+goos: linux
+goarch: amd64
+pkg: github.com/TeaOSLab/EdgeNode/internal/httpcache
+cpu: AMD EPYC 7643 48-Core Processor                
+BenchmarkMatchesVary/NoVary-2         	 6701708	        46.45 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMatchesVary/NoVary-2         	 8221117	        45.96 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMatchesVary/NoVary-2         	 8191034	        48.68 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMatchesVary/NoVary-2         	 8000415	        44.35 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMatchesVary/NoVary-2         	 7995849	        45.95 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMatchesVary/Origin-2         	  217610	      1485 ns/op	     560 B/op	      10 allocs/op
+BenchmarkMatchesVary/Origin-2         	  244407	      1466 ns/op	     560 B/op	      10 allocs/op
+BenchmarkMatchesVary/Origin-2         	  222661	      1566 ns/op	     560 B/op	      10 allocs/op
+BenchmarkMatchesVary/Origin-2         	  244153	      1480 ns/op	     560 B/op	      10 allocs/op
+BenchmarkMatchesVary/Origin-2         	  259570	      1464 ns/op	     560 B/op	      10 allocs/op
+BenchmarkMatchesVary/OriginAndLanguage-2         	  165700	      2124 ns/op	     656 B/op	      12 allocs/op
+BenchmarkMatchesVary/OriginAndLanguage-2         	  165378	      2040 ns/op	     656 B/op	      12 allocs/op
+BenchmarkMatchesVary/OriginAndLanguage-2         	  149133	      2173 ns/op	     656 B/op	      12 allocs/op
+BenchmarkMatchesVary/OriginAndLanguage-2         	  172071	      2100 ns/op	     656 B/op	      12 allocs/op
+BenchmarkMatchesVary/OriginAndLanguage-2         	  168451	      2114 ns/op	     656 B/op	      12 allocs/op
+BenchmarkMatchesVary/MultipleFieldLines-2        	  149641	      2382 ns/op	     736 B/op	      15 allocs/op
+BenchmarkMatchesVary/MultipleFieldLines-2        	  149454	      2441 ns/op	     736 B/op	      15 allocs/op
+BenchmarkMatchesVary/MultipleFieldLines-2        	  146906	      2424 ns/op	     736 B/op	      15 allocs/op
+BenchmarkMatchesVary/MultipleFieldLines-2        	  138543	      2483 ns/op	     736 B/op	      15 allocs/op
+BenchmarkMatchesVary/MultipleFieldLines-2        	  126312	      2556 ns/op	     736 B/op	      15 allocs/op
+PASS
+ok  	github.com/TeaOSLab/EdgeNode/internal/httpcache	7.076s
+2026/11/11 10:29:47 [CACHE]add policy 91472
+goos: linux
+goarch: amd64
+pkg: github.com/TeaOSLab/EdgeNode/internal/nodes
+cpu: AMD EPYC 7643 48-Core Processor                
+BenchmarkCacheResponseMetadata/NoVary-2         	   71016	      4670 ns/op	    2192 B/op	      25 allocs/op
+BenchmarkCacheResponseMetadata/NoVary-2         	   96278	      4044 ns/op	    2192 B/op	      25 allocs/op
+BenchmarkCacheResponseMetadata/NoVary-2         	   87524	      4047 ns/op	    2192 B/op	      25 allocs/op
+BenchmarkCacheResponseMetadata/NoVary-2         	   92019	      4021 ns/op	    2192 B/op	      25 allocs/op
+BenchmarkCacheResponseMetadata/NoVary-2         	   85089	      4235 ns/op	    2192 B/op	      25 allocs/op
+BenchmarkCacheResponseMetadata/OriginAndLanguage-2         	   31953	     11551 ns/op	    5552 B/op	      73 allocs/op
+BenchmarkCacheResponseMetadata/OriginAndLanguage-2         	   31236	     12285 ns/op	    5552 B/op	      73 allocs/op
+BenchmarkCacheResponseMetadata/OriginAndLanguage-2         	   27931	     13109 ns/op	    5552 B/op	      73 allocs/op
+BenchmarkCacheResponseMetadata/OriginAndLanguage-2         	   31434	     12483 ns/op	    5552 B/op	      73 allocs/op
+BenchmarkCacheResponseMetadata/OriginAndLanguage-2         	   30212	     12423 ns/op	    5552 B/op	      73 allocs/op
+BenchmarkCacheResponseMetadata/OriginPlusCompression-2     	   18357	     20085 ns/op	    8480 B/op	     115 allocs/op
+BenchmarkCacheResponseMetadata/OriginPlusCompression-2     	   14846	     22933 ns/op	    8481 B/op	     115 allocs/op
+BenchmarkCacheResponseMetadata/OriginPlusCompression-2     	   19126	     19045 ns/op	    8480 B/op	     115 allocs/op
+BenchmarkCacheResponseMetadata/OriginPlusCompression-2     	   17155	     20277 ns/op	    8481 B/op	     115 allocs/op
+BenchmarkCacheResponseMetadata/OriginPlusCompression-2     	   18487	     20290 ns/op	    8480 B/op	     115 allocs/op
+2026/11/11 10:29:52 [CACHE]remove policy 91472
+2026/11/11 10:29:52 [CACHE]close memory storage '91472'
+PASS
+ok  	github.com/TeaOSLab/EdgeNode/internal/nodes	5.742s
