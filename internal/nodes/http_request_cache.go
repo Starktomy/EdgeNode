@@ -2,6 +2,9 @@ package nodes
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -13,12 +16,15 @@ import (
 	"github.com/TeaOSLab/EdgeCommon/pkg/configutils"
 	"github.com/TeaOSLab/EdgeNode/internal/caches"
 	"github.com/TeaOSLab/EdgeNode/internal/compressions"
+	"github.com/TeaOSLab/EdgeNode/internal/httpcache"
 	"github.com/TeaOSLab/EdgeNode/internal/remotelogs"
 	"github.com/TeaOSLab/EdgeNode/internal/utils"
 	"github.com/TeaOSLab/EdgeNode/internal/utils/fasttime"
 	rangeutils "github.com/TeaOSLab/EdgeNode/internal/utils/ranges"
 	"github.com/iwind/TeaGo/types"
 )
+
+var sharedCacheFills = httpcache.NewFills(1024, 64)
 
 // 读取缓存
 func (this *HTTPRequest) doCacheRead(useStale bool) (shouldStop bool) {
@@ -100,7 +106,7 @@ func (this *HTTPRequest) doCacheRead(useStale bool) (shouldStop bool) {
 	}
 
 	// 是否正在Purge
-	var isPurging = this.web.Cache.PurgeIsOn && strings.ToUpper(this.RawReq.Method) == "PURGE" && this.RawReq.Header.Get("X-Edge-Purge-Key") == this.web.Cache.PurgeKey
+	var isPurging = this.web.Cache.PurgeIsOn && this.web.Cache.PurgeKey != "" && strings.ToUpper(this.RawReq.Method) == "PURGE" && this.RawReq.Header.Get("X-Edge-Purge-Key") == this.web.Cache.PurgeKey
 	if isPurging {
 		this.RawReq.Method = http.MethodGet
 	}
@@ -119,14 +125,17 @@ func (this *HTTPRequest) doCacheRead(useStale bool) (shouldStop bool) {
 
 	// Cache-Pragma
 	if this.cacheRef.EnableRequestCachePragma {
-		if this.RawReq.Header.Get("Cache-Control") == "no-cache" || this.RawReq.Header.Get("Pragma") == "no-cache" {
+		control := httpcache.ParseControl(this.RawReq.Header)
+		if control.Has("no-cache") || control.Has("no-store") || strings.EqualFold(strings.TrimSpace(this.RawReq.Header.Get("Pragma")), "no-cache") {
 			this.cacheRef = nil
 			cacheBypassDescription = "BYPASS, Cache-Control or Pragma"
 			return
 		}
 	}
 
-	// TODO 支持Vary Header
+	if this.cacheRequestHeader == nil {
+		this.cacheRequestHeader = this.RawReq.Header.Clone()
+	}
 
 	// 缓存标签
 	var tags = []string{}
@@ -205,7 +214,9 @@ func (this *HTTPRequest) doCacheRead(useStale bool) (shouldStop bool) {
 	}
 
 	// 调用回调
-	this.onRequest()
+	if !this.cacheLookupRetried {
+		this.onRequest()
+	}
 	if this.writer.isFinished {
 		return
 	}
@@ -316,6 +327,42 @@ func (this *HTTPRequest) doCacheRead(useStale bool) (shouldStop bool) {
 
 		if err != nil {
 			if errors.Is(err, caches.ErrNotFound) {
+				if !useStale && !isPartialRequest && method == http.MethodGet && canRetryOriginRequest(this.RawReq) && !this.cacheFillChecked &&
+					this.RawReq.Header.Get("Authorization") == "" && this.RawReq.Header.Get("Cookie") == "" {
+					this.cacheFillChecked = true
+					if data, encodeErr := json.Marshal(this.cacheRequestHeader); encodeErr == nil && len(data) <= 64<<10 {
+						digest := sha256.Sum256(data)
+						version := int64(0)
+						if this.nodeConfig != nil {
+							version = this.nodeConfig.Version
+						}
+						identity := strconv.FormatInt(this.ReqServer.UserId, 10) + "/" + strconv.FormatInt(this.ReqServer.Id, 10) + "/" + strconv.FormatInt(version, 10) + "/" + strconv.FormatInt(cachePolicy.Id, 10) + "/" + key + "/" + hex.EncodeToString(digest[:])
+						scopedDigest := sha256.Sum256([]byte(identity))
+						producer, done, leave, joined := sharedCacheFills.Join(hex.EncodeToString(scopedDigest[:]))
+						if joined && producer {
+							this.cacheFillRelease = leave
+							// The prior producer may have committed between our first
+							// lookup and acquiring this lease. Recheck before origin work.
+							this.cacheLookupRetried = true
+							return this.doCacheRead(false)
+						} else if joined {
+							timer := time.NewTimer(2 * time.Second)
+							completed := false
+							select {
+							case <-done:
+								completed = true
+							case <-timer.C:
+							case <-this.RawReq.Context().Done():
+							}
+							timer.Stop()
+							leave()
+							if completed {
+								this.cacheLookupRetried = true
+								return this.doCacheRead(false)
+							}
+						}
+					}
+				}
 				// 移除请求中的 If-None-Match 和 If-Modified-Since，防止源站返回304而无法缓存
 				if this.reverseProxy != nil {
 					this.RawReq.Header.Del("If-None-Match")
@@ -364,6 +411,7 @@ func (this *HTTPRequest) doCacheRead(useStale bool) (shouldStop bool) {
 
 	// 读取Header
 	var headerData = []byte{}
+	var cachedHeader = make(http.Header)
 	this.writer.SetSentHeaderBytes(reader.HeaderSize())
 	var headerPool = this.bytePool(reader.HeaderSize())
 	var headerBuf = headerPool.Get()
@@ -378,7 +426,7 @@ func (this *HTTPRequest) doCacheRead(useStale bool) (shouldStop bool) {
 					return false, errors.New("invalid header '" + string(row) + "'")
 				}
 
-				this.writer.Header().Set(string(row[:spaceIndex]), string(row[spaceIndex+1:]))
+				cachedHeader.Add(string(row[:spaceIndex]), string(row[spaceIndex+1:]))
 				headerData = headerData[nIndex+1:]
 			} else {
 				break
@@ -392,6 +440,18 @@ func (this *HTTPRequest) doCacheRead(useStale bool) (shouldStop bool) {
 			remotelogs.WarnServer("HTTP_REQUEST_CACHE", this.URL()+": read from cache failed: read header failed: "+err.Error())
 		}
 		return
+	}
+
+	if !httpcache.MatchesVary(cachedHeader, this.cacheRequestHeader) ||
+		!httpcache.SharedResponseAllowed(this.cacheRequestHeader, cachedHeader) {
+		this.varMapping["cache.status"] = "BYPASS"
+		cacheBypassDescription = "BYPASS, response representation"
+		this.cacheRef = nil
+		return
+	}
+	cachedHeader.Del(httpcache.VaryMetadataHeader)
+	for name, values := range cachedHeader {
+		this.writer.Header()[name] = values
 	}
 
 	// 设置cache.age变量
@@ -439,19 +499,7 @@ func (this *HTTPRequest) doCacheRead(useStale bool) (shouldStop bool) {
 	}
 
 	// 支持 If-None-Match
-	if !this.isLnRequest && !isPartialCache && len(eTag) > 0 && this.requestHeader("If-None-Match") == eTag {
-		// 自定义Header
-		this.ProcessResponseHeaders(this.writer.Header(), http.StatusNotModified)
-		this.addExpiresHeader(reader.ExpiresAt())
-		this.writer.WriteHeader(http.StatusNotModified)
-		this.isCached = true
-		this.cacheRef = nil
-		this.writer.SetOk()
-		return true
-	}
-
-	// 支持 If-Modified-Since
-	if !this.isLnRequest && !isPartialCache && len(modifiedTime) > 0 && this.requestHeader("If-Modified-Since") == modifiedTime {
+	if !this.isLnRequest && !isPartialCache && httpcache.NotModified(this.RawReq, eTag, modifiedTime) {
 		// 自定义Header
 		this.ProcessResponseHeaders(this.writer.Header(), http.StatusNotModified)
 		this.addExpiresHeader(reader.ExpiresAt())

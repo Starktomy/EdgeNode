@@ -1190,14 +1190,8 @@ static size_t parse_number(struct libinjection_sqli_state * sf)
         }
     }
 
-    if (have_e == 1 && have_exp == 0) {
-        /* very special form of
-         * "1234.e"
-         * "10.10E"
-         * ".E"
-         * this is a WORD not a number!! */
-        st_assign(sf->current, TYPE_BAREWORD, start, pos - start, cs + start);
-    } else {
+    /* Upstream PR #60: an incomplete exponent is not a bare SQL word. */
+    if (!(have_e == 1 && have_exp == 0)) {
         st_assign(sf->current, TYPE_NUMBER, start, pos - start, cs + start);
     }
     return pos;

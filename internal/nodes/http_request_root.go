@@ -1,13 +1,12 @@
 package nodes
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"mime"
 	"net/http"
-	"net/url"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -67,109 +66,37 @@ func (this *HTTPRequest) doRoot() (isBreak bool) {
 		requestPath = this.uri[:questionMarkIndex]
 	}
 
-	// except hidden files
-	if this.web.Root.ExceptHiddenFiles &&
-		(strings.Contains(requestPath, "/.") || strings.Contains(requestPath, "\\.")) {
+	relative, err := normalizeRootPath(requestPath, this.web.Root.DecodePath, this.web.Root.StripPrefix, this.web.Root.ExceptHiddenFiles)
+	normalizedURLPath, canonicalErr := normalizeRootPath(requestPath, this.web.Root.DecodePath, "", this.web.Root.ExceptHiddenFiles)
+	if normalizedURLPath == "." {
+		normalizedURLPath = ""
+	}
+	var canonicalURL = this.requestScheme() + "://" + this.ReqHost + "/" + normalizedURLPath
+	if questionMarkIndex > -1 {
+		canonicalURL += this.uri[questionMarkIndex:]
+	}
+	if err != nil || canonicalErr != nil || !this.web.Root.MatchURL(this.URL()) || !this.web.Root.MatchURL(canonicalURL) {
 		this.write404()
 		return true
 	}
 
-	// except and only files
-	if !this.web.Root.MatchURL(this.URL()) {
-		this.write404()
-		return true
-	}
-
-	// 去掉其中的奇怪的路径
-	requestPath = strings.Replace(requestPath, "..\\", "", -1)
-
-	// 进行URL Decode
-	if this.web.Root.DecodePath {
-		p, err := url.QueryUnescape(requestPath)
-		if err == nil {
-			requestPath = p
-		} else {
-			if !this.canIgnore(err) {
-				logs.Error(err)
-			}
-		}
-	}
-
-	// 去掉前缀
-	stripPrefix := this.web.Root.StripPrefix
-	if len(stripPrefix) > 0 {
-		if stripPrefix[0] != '/' {
-			stripPrefix = "/" + stripPrefix
-		}
-
-		requestPath = strings.TrimPrefix(requestPath, stripPrefix)
-		if len(requestPath) == 0 || requestPath[0] != '/' {
-			requestPath = "/" + requestPath
-		}
-	}
-
-	var filename = strings.Replace(requestPath, "/", Tea.DS, -1)
-	var filePath string
-	if len(filename) > 0 && filename[0:1] == Tea.DS {
-		filePath = rootDir + filename
-	} else {
-		filePath = rootDir + Tea.DS + filename
-	}
-
-	this.filePath = filePath // 用来记录日志
-
-	stat, err := os.Stat(filePath)
+	fileReader, relative, err := openRootFile(rootDir, relative, this.web.Root.Indexes, this.web.Root.ExceptHiddenFiles)
 	if err != nil {
-		_, isPathError := err.(*fs.PathError)
-		if os.IsNotExist(err) || isPathError {
-			if this.web.Root.IsBreak {
-				this.write404()
-				return true
-			}
-			return
-		} else {
-			this.write50x(err, http.StatusInternalServerError, "Failed to stat the file", "查看文件统计信息失败", true)
-			if !this.canIgnore(err) {
-				logs.Error(err)
-			}
-			return true
+		if errors.Is(err, fs.ErrNotExist) && !this.web.Root.IsBreak {
+			return false
 		}
+		this.write404()
+		return true
 	}
-	if stat.IsDir() {
-		indexFile, indexStat := this.findIndexFile(filePath)
-		if len(indexFile) > 0 {
-			filePath += Tea.DS + indexFile
-		} else {
-			if this.web.Root.IsBreak {
-				this.write404()
-				return true
-			}
-			return
-		}
-		this.filePath = filePath
-
-		// stat again
-		if indexStat == nil {
-			stat, err = os.Stat(filePath)
-			if err != nil {
-				if os.IsNotExist(err) {
-					if this.web.Root.IsBreak {
-						this.write404()
-						return true
-					}
-					return
-				} else {
-					this.write50x(err, http.StatusInternalServerError, "Failed to stat the file", "查看文件统计信息失败", true)
-					if !this.canIgnore(err) {
-						logs.Error(err)
-					}
-					return true
-				}
-			}
-		} else {
-			stat = indexStat
-		}
+	defer fileReader.Close()
+	stat, err := fileReader.Stat()
+	if err != nil {
+		this.write50x(err, http.StatusInternalServerError, "Failed to stat the file", "查看文件统计信息失败", true)
+		return true
 	}
+	var filename = relative
+	var filePath = filepath.Join(rootDir, filepath.FromSlash(relative))
+	this.filePath = filePath
 
 	// 响应header
 	var respHeader = this.writer.Header()
@@ -297,12 +224,6 @@ func (this *HTTPRequest) doRoot() (isBreak bool) {
 		respHeader.Set("Content-Length", strconv.FormatInt(fileSize, 10))
 	}
 
-	fileReader, err := os.OpenFile(filePath, os.O_RDONLY, 0444)
-	if err != nil {
-		this.write50x(err, http.StatusInternalServerError, "Failed to open the file", "试图打开文件失败", true)
-		return true
-	}
-
 	// 自定义Header
 	this.ProcessResponseHeaders(this.writer.Header(), http.StatusOK)
 
@@ -418,44 +339,4 @@ func (this *HTTPRequest) doRoot() (isBreak bool) {
 	this.writer.SetOk()
 
 	return true
-}
-
-// 查找首页文件
-func (this *HTTPRequest) findIndexFile(dir string) (filename string, stat os.FileInfo) {
-	if this.web.Root == nil || !this.web.Root.IsOn {
-		return "", nil
-	}
-	if len(this.web.Root.Indexes) == 0 {
-		return "", nil
-	}
-	for _, index := range this.web.Root.Indexes {
-		if len(index) == 0 {
-			continue
-		}
-
-		// 模糊查找
-		if strings.Contains(index, "*") {
-			indexFiles, err := filepath.Glob(dir + Tea.DS + index)
-			if err != nil {
-				if !this.canIgnore(err) {
-					logs.Error(err)
-				}
-				this.addError(err)
-				continue
-			}
-			if len(indexFiles) > 0 {
-				return filepath.Base(indexFiles[0]), nil
-			}
-			continue
-		}
-
-		// 精确查找
-		filePath := dir + Tea.DS + index
-		stat, err := os.Stat(filePath)
-		if err != nil || !stat.Mode().IsRegular() {
-			continue
-		}
-		return index, stat
-	}
-	return "", nil
 }

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/TeaOSLab/EdgeCommon/pkg/rpc/pb"
@@ -28,7 +30,7 @@ var sharedUpgradeManager = NewUpgradeManager()
 // UpgradeManager 节点升级管理器
 // TODO 需要在集群中设置是否自动更新
 type UpgradeManager struct {
-	isInstalling bool
+	isInstalling atomic.Bool
 	lastFile     string
 	exe          string
 }
@@ -40,30 +42,25 @@ func NewUpgradeManager() *UpgradeManager {
 
 // Start 启动升级
 func (this *UpgradeManager) Start() {
+	// Only one caller may prepare or replace the installation at a time.
+	if Tea.IsTesting() || !this.isInstalling.CompareAndSwap(false, true) {
+		return
+	}
 	// 必须放在文件解压之前读取可执行文件路径，防止解析之后，当前的可执行文件路径发生改变
 	exe, err := os.Executable()
 	if err != nil {
 		remotelogs.Error("UPGRADE_MANAGER", "can not find current executable file name")
+		this.isInstalling.Store(false)
 		return
 	}
 	this.exe = exe
-
-	// 测试环境下不更新
-	if Tea.IsTesting() {
-		return
-	}
-
-	if this.isInstalling {
-		return
-	}
-	this.isInstalling = true
 
 	remotelogs.Println("UPGRADE_MANAGER", "upgrading node ...")
 	err = this.install()
 	if err != nil {
 		remotelogs.Error("UPGRADE_MANAGER", "download failed: "+err.Error())
 
-		this.isInstalling = false
+		this.isInstalling.Store(false)
 		return
 	}
 
@@ -75,13 +72,13 @@ func (this *UpgradeManager) Start() {
 			remotelogs.Error("UPGRADE_MANAGER", err.Error())
 		}
 
-		this.isInstalling = false
+		this.isInstalling.Store(false)
 	})
 }
 
 // IsInstalling 检查是否正在安装
 func (this *UpgradeManager) IsInstalling() bool {
-	return this.isInstalling
+	return this.isInstalling.Load()
 }
 
 func (this *UpgradeManager) install() error {
@@ -100,25 +97,21 @@ func (this *UpgradeManager) install() error {
 
 	// 创建临时文件
 	var dir = Tea.Root + "/tmp"
-	_, err := os.Stat(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			err = os.Mkdir(dir, 0777)
-			if err != nil {
-				return err
-			}
-		} else {
-			return err
-		}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return err
 	}
 
 	remotelogs.Println("UPGRADE_MANAGER", "downloading new node ...")
 
-	var path = dir + "/edge-node.tmp"
-	fp, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0777)
+	fp, err := os.CreateTemp(dir, ".edge-node-upgrade-*")
 	if err != nil {
 		return err
 	}
+	path := fp.Name()
+	defer os.Remove(path)
 	isClosed := false
 	defer func() {
 		if !isClosed {
@@ -135,6 +128,7 @@ func (this *UpgradeManager) install() error {
 	var h = md5.New()
 	var sum = ""
 	var filename = ""
+	var version = ""
 	for {
 		resp, err := client.NodeRPC.DownloadNodeInstallationFile(client.Context(), &pb.DownloadNodeInstallationFileRequest{
 			Os:          runtime.GOOS,
@@ -147,13 +141,19 @@ func (this *UpgradeManager) install() error {
 		if len(resp.Sum) == 0 {
 			return nil
 		}
-		sum = resp.Sum
-		filename = resp.Filename
+		if offset == 0 {
+			sum, filename, version = resp.Sum, resp.Filename, resp.Version
+		} else if resp.Sum != sum || resp.Filename != filename || resp.Version != version {
+			return fmt.Errorf("node installation changed during download")
+		}
 		if stringutil.VersionCompare(resp.Version, teaconst.Version) <= 0 {
 			return nil
 		}
 		if len(resp.ChunkData) == 0 {
 			break
+		}
+		if resp.Offset <= offset || resp.Offset != offset+int64(len(resp.ChunkData)) || resp.Offset > 256<<20 {
+			return fmt.Errorf("invalid or oversized node installation chunk")
 		}
 
 		// 写入文件
@@ -172,6 +172,9 @@ func (this *UpgradeManager) install() error {
 	if len(filename) == 0 {
 		return nil
 	}
+	if filepath.Base(filename) != filename || strings.ContainsAny(filename, "\\:") || !strings.HasSuffix(filename, ".zip") {
+		return fmt.Errorf("invalid node installation filename")
+	}
 
 	isClosed = true
 	err = fp.Close()
@@ -181,7 +184,7 @@ func (this *UpgradeManager) install() error {
 
 	if fmt.Sprintf("%x", h.Sum(nil)) != sum {
 		_ = os.Remove(path)
-		return nil
+		return fmt.Errorf("node installation checksum mismatch")
 	}
 
 	// 改成zip

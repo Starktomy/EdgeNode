@@ -8,6 +8,7 @@ extern "C" {
 /* pull in size_t */
 
 #include <stddef.h>
+#include "libinjection_error.h"
 
 enum html5_type {
     DATA_TEXT
@@ -46,6 +47,7 @@ typedef struct h5_state {
 
 
 void libinjection_h5_init(h5_state_t* hs, const char* s, size_t len, enum html5_flags);
+/* Keeps the GoEdge integer ABI; returns -1 for an invalid parser state. */
 int libinjection_h5_next(h5_state_t* hs);
 
 #ifdef __cplusplus

@@ -7,13 +7,18 @@ import (
 	"strconv"
 
 	"github.com/iwind/TeaGo/types"
-	"golang.org/x/exp/constraints"
 )
 
-type IntValueEncoder[T constraints.Integer] struct {
+// Integer is the stable integer type set used by the on-disk value encoder.
+type Integer interface {
+	~int | ~int8 | ~int16 | ~int32 | ~int64 |
+		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~uintptr
 }
 
-func NewIntValueEncoder[T constraints.Integer]() *IntValueEncoder[T] {
+type IntValueEncoder[T Integer] struct {
+}
+
+func NewIntValueEncoder[T Integer]() *IntValueEncoder[T] {
 	return &IntValueEncoder[T]{}
 }
 

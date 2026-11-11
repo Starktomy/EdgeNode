@@ -47,12 +47,7 @@ func (this *Checkpoint) Priority() int {
 }
 
 func (this *Checkpoint) RequestBodyIsEmpty(req requests.Request) bool {
-	if req.WAFRaw().ContentLength == 0 {
-		return true
-	}
-
-	var method = req.WAFRaw().Method
-	if method == http.MethodHead || method == http.MethodGet {
+	if req.WAFRaw().Body == nil || req.WAFRaw().Body == http.NoBody {
 		return true
 	}
 

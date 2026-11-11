@@ -13,7 +13,7 @@ import (
 	"github.com/TeaOSLab/EdgeNode/internal/waf/requests"
 	"github.com/iwind/TeaGo/Tea"
 	"github.com/iwind/TeaGo/files"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 type WAF struct {
@@ -130,7 +130,7 @@ func (this *WAF) Init() (resultErrors []error) {
 		}
 	}
 
-	return nil
+	return resultErrors
 }
 
 func (this *WAF) AddRuleGroup(ruleGroup *RuleGroup) {

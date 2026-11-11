@@ -1,7 +1,6 @@
 #include "libinjection_html5.h"
 
 #include <string.h>
-#include <assert.h>
 
 #ifdef DEBUG
 #include <stdio.h>
@@ -93,7 +92,10 @@ void libinjection_h5_init(h5_state_t* hs, const char* s, size_t len, enum html5_
  */
 int libinjection_h5_next(h5_state_t* hs)
 {
-    assert(hs->state != NULL);
+    if (hs == NULL || hs->state == NULL || hs->pos > hs->len ||
+        (hs->s == NULL && hs->len > 0)) {
+        return LIBINJECTION_RESULT_ERROR;
+    }
     return (*hs->state)(hs);
 }
 
@@ -117,9 +119,9 @@ static int h5_is_white(char ch)
 
 static int h5_skip_white(h5_state_t* hs)
 {
-    char ch;
+    unsigned char ch;
     while (hs->pos < hs->len) {
-        ch = hs->s[hs->pos];
+        ch = (unsigned char)hs->s[hs->pos];
         switch (ch) {
         case 0x00: /* IE only */
         case 0x20:
@@ -149,7 +151,13 @@ static int h5_state_data(h5_state_t* hs)
     const char* idx;
 
     TRACE();
-    assert(hs->len >= hs->pos);
+    if (hs == NULL || hs->len < hs->pos) {
+        return LIBINJECTION_RESULT_ERROR;
+    }
+    if (hs->len == hs->pos) {
+        hs->state = h5_state_eof;
+        return LIBINJECTION_RESULT_FALSE;
+    }
     idx = (const char*) memchr(hs->s + hs->pos, CHAR_LT, hs->len - hs->pos);
     if (idx == NULL) {
         hs->token_start = hs->s + hs->pos;
@@ -603,7 +611,9 @@ static int h5_state_self_closing_start_tag(h5_state_t* hs)
     }
     ch = hs->s[hs->pos];
     if (ch == CHAR_GT) {
-        assert(hs->pos > 0);
+        if (hs->pos == 0) {
+            return LIBINJECTION_RESULT_ERROR;
+        }
         hs->token_start = hs->s + hs->pos -1;
         hs->token_len = 2;
         hs->token_type = TAG_NAME_SELFCLOSE;

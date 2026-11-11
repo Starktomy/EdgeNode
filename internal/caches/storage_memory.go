@@ -137,7 +137,7 @@ func (this *MemoryStorage) OpenReader(key string, useStale bool, isPartial bool)
 	}
 
 	// read from valuesMap
-	this.locker.RLock()
+	this.locker.Lock()
 	var item = this.valuesMap[hash]
 
 	if item != nil {
@@ -145,7 +145,7 @@ func (this *MemoryStorage) OpenReader(key string, useStale bool, isPartial bool)
 	}
 
 	if item == nil || !item.IsDone {
-		this.locker.RUnlock()
+		this.locker.Unlock()
 		return nil, ErrNotFound
 	}
 
@@ -153,14 +153,14 @@ func (this *MemoryStorage) OpenReader(key string, useStale bool, isPartial bool)
 		var reader = NewMemoryReader(item)
 		err := reader.Init()
 		if err != nil {
-			this.locker.RUnlock()
+			this.locker.Unlock()
 			return nil, err
 		}
-		this.locker.RUnlock()
+		this.locker.Unlock()
 
 		return reader, nil
 	}
-	this.locker.RUnlock()
+	this.locker.Unlock()
 
 	_ = this.Delete(key)
 
@@ -510,7 +510,7 @@ func (this *MemoryStorage) startFlush() {
 
 		this.flushItem(key)
 
-		if fsutils.IsInExtremelyHighLoad {
+		if fsutils.ExtremelyHighLoad() {
 			time.Sleep(1 * time.Second)
 		}
 	}

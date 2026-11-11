@@ -80,13 +80,18 @@ type HTTPRequest struct {
 	rewriteIsExternalURL bool                              // 重写目标是否为外部URL
 	remoteAddr           string                            // 计算后的RemoteAddr
 
-	cacheRef         *serverconfigs.HTTPCacheRef // 缓存设置
-	cacheKey         string                      // 缓存使用的Key
-	isCached         bool                        // 是否已经被缓存
-	cacheCanTryStale bool                        // 是否可以尝试使用Stale缓存
+	cacheRef           *serverconfigs.HTTPCacheRef // 缓存设置
+	cacheKey           string                      // 缓存使用的Key
+	isCached           bool                        // 是否已经被缓存
+	cacheCanTryStale   bool                        // 是否可以尝试使用Stale缓存
+	cacheRequestHeader http.Header                 // Original request headers used for Vary matching.
+	cacheFillChecked   bool
+	cacheFillRelease   func()
+	cacheLookupRetried bool
 
-	isAttack        bool   // 是否是攻击请求
-	requestBodyData []byte // 读取的Body内容
+	isAttack           bool   // 是否是攻击请求
+	requestBodyData    []byte // 读取的Body内容
+	wafRequestBodyData []byte // Decoded inspection body, separate from access log wire bytes.
 
 	isWebsocketResponse bool // 是否为Websocket响应（非请求）
 
@@ -163,6 +168,11 @@ func (this *HTTPRequest) Do() {
 	err := this.configureWeb(this.ReqServer.Web, true, 0)
 	if err != nil {
 		this.write50x(err, http.StatusInternalServerError, "Failed to configure the server", "配置服务失败", false)
+		this.doEnd()
+		return
+	}
+	if err := this.prepareRequestBodyLimit(); err != nil {
+		this.writer.Send(http.StatusRequestEntityTooLarge, "Request body too large")
 		this.doEnd()
 		return
 	}
@@ -1209,141 +1219,46 @@ func (this *HTTPRequest) requestRemoteAddr(supportVar bool) string {
 	if len(this.lnRemoteAddr) > 0 {
 		return this.lnRemoteAddr
 	}
-
 	if supportVar && len(this.remoteAddr) > 0 {
 		return this.remoteAddr
 	}
-
-	if supportVar &&
-		this.web.RemoteAddr != nil &&
-		this.web.RemoteAddr.IsOn &&
-		!this.web.RemoteAddr.IsEmpty() {
-		if this.web.RemoteAddr.HasValues() { // multiple values
-			for _, value := range this.web.RemoteAddr.Values() {
-				var remoteAddr = this.Format(value)
-				if len(remoteAddr) > 0 && net.ParseIP(remoteAddr) != nil {
-					this.remoteAddr = remoteAddr
-					return remoteAddr
+	var peer = socketPeerIP(this.RawReq.RemoteAddr)
+	var client = peer
+	if sharedProxyResolver.trusts(peer) {
+		client = sharedProxyResolver.forwardedIP(this.RawReq.Header, peer)
+		if supportVar && this.web != nil && this.web.RemoteAddr != nil && this.web.RemoteAddr.IsOn {
+			var config = this.web.RemoteAddr
+			if config.Type == serverconfigs.HTTPRemoteAddrTypeDefault || config.Value == "${rawRemoteAddr}" {
+				client = peer
+			} else if !config.IsEmpty() {
+				var values = []string{config.Value}
+				if config.HasValues() {
+					values = config.Values()
+				}
+				client = peer
+				for _, value := range values {
+					if strings.EqualFold(value, "${header.X-Forwarded-For}") {
+						client = sharedProxyResolver.forwardedIP(this.RawReq.Header, peer)
+						break
+					}
+					if parsed, ok := parsedClientIP(this.Format(value)); ok {
+						client = parsed
+						break
+					}
 				}
 			}
-		} else { // single value
-			var remoteAddr = this.Format(this.web.RemoteAddr.Value)
-			if len(remoteAddr) > 0 && net.ParseIP(remoteAddr) != nil {
-				this.remoteAddr = remoteAddr
-				return remoteAddr
-			}
-		}
-
-		// 如果是从Header中读取，则直接返回原始IP
-		if this.web.RemoteAddr.Type == serverconfigs.HTTPRemoteAddrTypeRequestHeader {
-			var remoteAddr = this.RawReq.RemoteAddr
-			host, _, err := net.SplitHostPort(remoteAddr)
-			if err == nil {
-				this.remoteAddr = host
-				return host
-			} else {
-				return remoteAddr
-			}
 		}
 	}
-
-	// X-Forwarded-For
-	var forwardedFor = this.RawReq.Header.Get("X-Forwarded-For")
-	if len(forwardedFor) > 0 {
-		commaIndex := strings.Index(forwardedFor, ",")
-		if commaIndex > 0 {
-			forwardedFor = forwardedFor[:commaIndex]
-		}
-		if net.ParseIP(forwardedFor) != nil {
-			if supportVar {
-				this.remoteAddr = forwardedFor
-			}
-			return forwardedFor
-		}
+	if supportVar {
+		this.remoteAddr = client
 	}
-
-	// Real-IP
-	{
-		realIP, ok := this.RawReq.Header["X-Real-IP"]
-		if ok && len(realIP) > 0 {
-			if net.ParseIP(realIP[0]) != nil {
-				if supportVar {
-					this.remoteAddr = realIP[0]
-				}
-				return realIP[0]
-			}
-		}
-	}
-
-	// Real-Ip
-	{
-		realIP, ok := this.RawReq.Header["X-Real-Ip"]
-		if ok && len(realIP) > 0 {
-			if net.ParseIP(realIP[0]) != nil {
-				if supportVar {
-					this.remoteAddr = realIP[0]
-				}
-				return realIP[0]
-			}
-		}
-	}
-
-	// Remote-Addr
-	var remoteAddr = this.RawReq.RemoteAddr
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err == nil {
-		if supportVar {
-			this.remoteAddr = host
-		}
-		return host
-	} else {
-		return remoteAddr
-	}
+	return client
 }
 
-// 获取请求的客户端地址列表
-func (this *HTTPRequest) requestRemoteAddrs() (result []string) {
-	result = append(result, this.requestRemoteAddr(true))
-
-	// X-Forwarded-For
-	var forwardedFor = this.RawReq.Header.Get("X-Forwarded-For")
-	if len(forwardedFor) > 0 {
-		commaIndex := strings.Index(forwardedFor, ",")
-		if commaIndex > 0 && !lists.ContainsString(result, forwardedFor[:commaIndex]) {
-			result = append(result, forwardedFor[:commaIndex])
-		}
-	}
-
-	// Real-IP
-	{
-		realIP, ok := this.RawReq.Header["X-Real-IP"]
-		if ok && len(realIP) > 0 && !lists.ContainsString(result, realIP[0]) {
-			result = append(result, realIP[0])
-		}
-	}
-
-	// Real-Ip
-	{
-		realIP, ok := this.RawReq.Header["X-Real-Ip"]
-		if ok && len(realIP) > 0 && !lists.ContainsString(result, realIP[0]) {
-			result = append(result, realIP[0])
-		}
-	}
-
-	// Remote-Addr
-	{
-		var remoteAddr = this.RawReq.RemoteAddr
-		host, _, err := net.SplitHostPort(remoteAddr)
-		if err == nil {
-			if !lists.ContainsString(result, host) {
-				result = append(result, host)
-			}
-		} else {
-			result = append(result, remoteAddr)
-		}
-	}
-
-	return
+// Only verified identity participates in access-control lists. Other forwarded
+// header claims must never become extra opportunities to match a white list.
+func (this *HTTPRequest) requestRemoteAddrs() []string {
+	return []string{this.requestRemoteAddr(true)}
 }
 
 // 请求内容长度

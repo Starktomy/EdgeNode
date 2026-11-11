@@ -34,7 +34,8 @@ func DetectSQLInjectionCache(input string, isStrict bool, cacheLife utils.CacheL
 	}
 
 	var hash = xxhash.Sum64String(input)
-	var key = "WAF@SQLI@" + strconv.FormatUint(hash, 10)
+	// Version the namespace to invalidate decisions cached without the mode.
+	var key = "WAF@SQLI@2@" + strconv.FormatBool(isStrict) + "@" + strconv.FormatUint(hash, 10)
 	var item = utils.SharedCache.Read(key)
 	if item != nil {
 		return item.Value == 1

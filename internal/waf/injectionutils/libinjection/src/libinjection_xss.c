@@ -3,7 +3,6 @@
 #include "libinjection_xss.h"
 #include "libinjection_html5.h"
 
-#include <assert.h>
 #include <stdio.h>
 
 typedef enum attribute {
@@ -66,7 +65,9 @@ static int html_decode_char_at(const char* src, size_t len, size_t* consumed)
     }
 
     *consumed = 1;
-    if (*src != '&' || len < 2) {
+    /* Upstream PR #72: validate the full prefix before looking past len. */
+    if (*src != '&' || len < 3 ||
+        ((src[2] == 'x' || src[2] == 'X') && len < 4)) {
         return (unsigned char)(*src);
     }
 
@@ -713,8 +714,11 @@ static attribute_t is_black_attr(const char* s, size_t len, int strictMode)
         if ((s[0] == 'o' || s[0] == 'O') && (s[1] == 'n' || s[1] == 'N')) {
             black = BLACKATTREVENT;
             const char *s_without_on = &s[2]; // start comparing from the third char
+            const size_t s_without_on_len = len - 2;
             while (black->name != NULL) {
-                if (cstrcasecmp_with_null(black->name, s_without_on, strlen(black->name)) == 0) {
+                const size_t name_len = strlen(black->name);
+                const size_t compare_len = s_without_on_len < name_len ? s_without_on_len : name_len;
+                if (cstrcasecmp_with_null(black->name, s_without_on, compare_len) == 0) {
                     /* printf("Got banned attribute name %s\n", black->name); */
                     return black->atype;
                 }
@@ -794,9 +798,10 @@ int libinjection_is_xss(const char* s, size_t len, int flags, int strictMode)
 {
     h5_state_t h5;
     attribute_t attr = TYPE_NONE;
+    int parser_result;
 
     libinjection_h5_init(&h5, s, len, (enum html5_flags) flags);
-    while (libinjection_h5_next(&h5)) {
+    while ((parser_result = libinjection_h5_next(&h5)) == LIBINJECTION_RESULT_TRUE) {
         if (h5.token_type != ATTR_VALUE) {
             attr = TYPE_NONE;
         }
@@ -883,7 +888,7 @@ int libinjection_is_xss(const char* s, size_t len, int flags, int strictMode)
             }
         }
     }
-    return 0;
+    return parser_result;
 }
 
 
@@ -898,20 +903,21 @@ int libinjection_is_xss(const char* s, size_t len, int flags, int strictMode)
  */
 int libinjection_xss(const char* s, size_t slen, int strictMode)
 {
-    if (libinjection_is_xss(s, slen, DATA_STATE, strictMode)) {
-        return 1;
+    int result;
+    if ((result = libinjection_is_xss(s, slen, DATA_STATE, strictMode)) != LIBINJECTION_RESULT_FALSE) {
+        return result;
     }
-    if (libinjection_is_xss(s, slen, VALUE_NO_QUOTE, strictMode)) {
-        return 1;
+    if ((result = libinjection_is_xss(s, slen, VALUE_NO_QUOTE, strictMode)) != LIBINJECTION_RESULT_FALSE) {
+        return result;
     }
-    if (libinjection_is_xss(s, slen, VALUE_SINGLE_QUOTE, strictMode)) {
-        return 1;
+    if ((result = libinjection_is_xss(s, slen, VALUE_SINGLE_QUOTE, strictMode)) != LIBINJECTION_RESULT_FALSE) {
+        return result;
     }
-    if (libinjection_is_xss(s, slen, VALUE_DOUBLE_QUOTE, strictMode)) {
-        return 1;
+    if ((result = libinjection_is_xss(s, slen, VALUE_DOUBLE_QUOTE, strictMode)) != LIBINJECTION_RESULT_FALSE) {
+        return result;
     }
-    if (libinjection_is_xss(s, slen, VALUE_BACK_QUOTE, strictMode)) {
-        return 1;
+    if ((result = libinjection_is_xss(s, slen, VALUE_BACK_QUOTE, strictMode)) != LIBINJECTION_RESULT_FALSE) {
+        return result;
     }
 
     return 0;

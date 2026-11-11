@@ -72,7 +72,7 @@ func NewClientConn(rawConn net.Conn, isHTTP bool, isTLS bool, isInAllowList bool
 	}
 
 	// 超时等设置
-	var globalServerConfig = sharedNodeConfig.GlobalServerConfig
+	var globalServerConfig = currentNodeConfig().GlobalServerConfig
 	if globalServerConfig != nil {
 		var performanceConfig = globalServerConfig.Performance
 		conn.isDebugging = performanceConfig.Debug
@@ -137,7 +137,7 @@ func (this *ClientConn) Read(b []byte) (n int, err error) {
 	if !this.isPersistent && this.isHTTP && !this.isInAllowList && !utils.IsLocalIP(this.RawIP()) {
 		// SYN Flood检测
 		if this.serverId == 0 || !this.hasResetSYNFlood {
-			var synFloodConfig = sharedNodeConfig.SYNFloodConfig()
+			var synFloodConfig = currentNodeConfig().SYNFloodConfig()
 			if synFloodConfig != nil && synFloodConfig.IsOn {
 				if isHandshakeError {
 					this.increaseSYNFlood(synFloodConfig)

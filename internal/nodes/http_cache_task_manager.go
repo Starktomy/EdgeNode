@@ -276,7 +276,7 @@ func (this *HTTPCacheTaskManager) simplifyErr(err error) error {
 func (this *HTTPCacheTaskManager) httpClient() *http.Client {
 	var timeout = serverconfigs.DefaultHTTPCachePolicyFetchTimeout
 
-	var nodeConfig = sharedNodeConfig // copy
+	var nodeConfig = currentNodeConfig() // copy
 	if nodeConfig != nil {
 		var cachePolicies = nodeConfig.HTTPCachePolicies // copy
 		if len(cachePolicies) > 0 && cachePolicies[0].FetchTimeout != nil && cachePolicies[0].FetchTimeout.Count > 0 {
@@ -303,7 +303,7 @@ func (this *HTTPCacheTaskManager) httpClient() *http.Client {
 				if err != nil {
 					return nil, err
 				}
-				conn, err := net.Dial(network, "127.0.0.1:"+port)
+				conn, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, "127.0.0.1:"+port)
 				if err != nil {
 					return nil, err
 				}
@@ -315,11 +315,15 @@ func (this *HTTPCacheTaskManager) httpClient() *http.Client {
 			MaxConnsPerHost:       32,
 			IdleConnTimeout:       2 * time.Minute,
 			ExpectContinueTimeout: 1 * time.Second,
-			TLSHandshakeTimeout:   0,
+			TLSHandshakeTimeout:   5 * time.Second,
 			TLSClientConfig: &tls.Config{
+				// Cache warming connects exclusively to this process via loopback.
+				// Site certificates may be private; redirects must never leave it.
+				MinVersion:         tls.VersionTLS12,
 				InsecureSkipVerify: true,
 			},
 		},
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 	}
 
 	this.timeoutClientMap[timeout] = client

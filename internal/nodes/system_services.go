@@ -44,15 +44,15 @@ func NewSystemServiceManager() *SystemServiceManager {
 }
 
 func (this *SystemServiceManager) Setup() error {
-	if sharedNodeConfig == nil || !sharedNodeConfig.IsOn {
+	if currentNodeConfig() == nil || !currentNodeConfig().IsOn {
 		return nil
 	}
 
-	if len(sharedNodeConfig.SystemServices) == 0 {
+	if len(currentNodeConfig().SystemServices) == 0 {
 		return nil
 	}
 
-	systemdParams, ok := sharedNodeConfig.SystemServices[nodeconfigs.SystemServiceTypeSystemd]
+	systemdParams, ok := currentNodeConfig().SystemServices[nodeconfigs.SystemServiceTypeSystemd]
 	if ok {
 		err := this.setupSystemd(systemdParams)
 		if err != nil {

@@ -5,6 +5,7 @@ package nodes
 import (
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	teaconst "github.com/TeaOSLab/EdgeNode/internal/const"
@@ -56,9 +57,9 @@ func CleanOriginConnsTask() {
 type OriginConn struct {
 	net.Conn
 
-	lastReadOk bool
-	lastReadAt int64
-	isClosed   bool
+	lastReadOk atomic.Bool
+	lastReadAt atomic.Int64
+	isClosed   atomic.Bool
 }
 
 // NewOriginConn create new origin connection
@@ -69,35 +70,33 @@ func NewOriginConn(rawConn net.Conn) net.Conn {
 // Read implement Read() for net.Conn interface
 func (this *OriginConn) Read(b []byte) (n int, err error) {
 	n, err = this.Conn.Read(b)
-	this.lastReadOk = err == nil
-	if this.lastReadOk {
-		this.lastReadAt = fasttime.Now().Unix()
+	this.lastReadOk.Store(err == nil)
+	if err == nil {
+		this.lastReadAt.Store(fasttime.Now().Unix())
 	}
 	return
 }
 
 // Close implement Close() for net.Conn interface
 func (this *OriginConn) Close() error {
-	if this.lastReadOk && fasttime.Now().Unix()-this.lastReadAt <= originConnCloseDelaySeconds {
+	if this.lastReadOk.Load() && !this.isClosed.Load() && fasttime.Now().Unix()-this.lastReadAt.Load() <= originConnCloseDelaySeconds {
 		closingOriginConnLocker.Lock()
 		closingOriginConnMap[this] = zero.Zero{}
 		closingOriginConnLocker.Unlock()
 		return nil
 	}
 
-	this.isClosed = true
-	return this.Conn.Close()
+	return this.ForceClose()
 }
 
 func (this *OriginConn) ForceClose() error {
-	if this.isClosed {
+	if this.isClosed.Swap(true) {
 		return nil
 	}
 
-	this.isClosed = true
 	return this.Conn.Close()
 }
 
 func (this *OriginConn) IsExpired() bool {
-	return fasttime.Now().Unix()-this.lastReadAt > originConnCloseDelaySeconds
+	return fasttime.Now().Unix()-this.lastReadAt.Load() > originConnCloseDelaySeconds
 }

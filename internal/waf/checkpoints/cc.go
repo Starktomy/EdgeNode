@@ -76,7 +76,11 @@ func (this *CCCheckpoint) RequestValue(req requests.Request, param string, optio
 			if len(userField) == 0 {
 				key = req.WAFRemoteIP()
 			} else {
-				v := req.WAFRaw().PostFormValue(userField)
+				v, err := requests.PostFormValue(req, userField)
+				if err != nil {
+					return nil, true, err, nil
+				}
+				hasRequestBody = true
 				if userIndex > 0 && len(v) > userIndex {
 					v = v[userIndex:]
 				}

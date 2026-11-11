@@ -1,14 +1,20 @@
 package stats
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TeaOSLab/EdgeCommon/pkg/nodeconfigs"
 	"github.com/TeaOSLab/EdgeCommon/pkg/rpc/pb"
+	"github.com/TeaOSLab/EdgeNode/internal/delivery"
 	"github.com/TeaOSLab/EdgeNode/internal/events"
 	"github.com/TeaOSLab/EdgeNode/internal/monitor"
 	"github.com/TeaOSLab/EdgeNode/internal/remotelogs"
@@ -18,6 +24,10 @@ import (
 	"github.com/iwind/TeaGo/Tea"
 	"github.com/iwind/TeaGo/maps"
 	"github.com/iwind/TeaGo/types"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 var SharedTrafficStatManager = NewTrafficStatManager()
@@ -48,12 +58,22 @@ type TrafficStatManager struct {
 	itemMap    map[string]*TrafficItem           // [timestamp serverId] => *TrafficItem
 	domainsMap map[int64]map[string]*TrafficItem // serverIde =>  { timestamp @ domain => *TrafficItem }
 
-	pbItems       []*pb.ServerDailyStat
-	pbDomainItems []*pb.UploadServerDailyStatsRequest_DomainStat
+	batchSpool   *delivery.Spool
+	uploadLocker sync.Mutex
+	sendBatch    func(context.Context, string, *pb.UploadServerDailyStatsRequest) error
 
 	locker sync.Mutex
 
-	totalRequests int64
+	totalRequests        atomic.Int64
+	droppedDomainSamples atomic.Uint64
+}
+
+const maxBufferedDomainsPerServer = 256
+
+// DroppedDomainSamples counts samples omitted from the optional domain
+// breakdown. Server totals are always recorded before this sampling boundary.
+func (this *TrafficStatManager) DroppedDomainSamples() uint64 {
+	return this.droppedDomainSamples.Load()
 }
 
 // NewTrafficStatManager 获取新对象
@@ -61,6 +81,7 @@ func NewTrafficStatManager() *TrafficStatManager {
 	var manager = &TrafficStatManager{
 		itemMap:    map[string]*TrafficItem{},
 		domainsMap: map[int64]map[string]*TrafficItem{},
+		batchSpool: delivery.NewSpool(filepath.Join(Tea.Root, "data", "spool", "traffic"), 256<<20, 16<<20),
 	}
 
 	return manager
@@ -75,9 +96,8 @@ func (this *TrafficStatManager) Start() {
 	})
 	goman.New(func() {
 		for range monitorTicker.C {
-			if this.totalRequests > 0 {
-				monitor.SharedValueQueue.Add(nodeconfigs.NodeValueItemRequests, maps.Map{"total": this.totalRequests})
-				this.totalRequests = 0
+			if total := this.totalRequests.Swap(0); total > 0 {
+				monitor.SharedValueQueue.Add(nodeconfigs.NodeValueItemRequests, maps.Map{"total": total})
 			}
 		}
 	})
@@ -119,7 +139,7 @@ func (this *TrafficStatManager) Add(userId int64, serverId int64, domain string,
 		return
 	}
 
-	this.totalRequests++
+	this.totalRequests.Add(1)
 
 	var timestamp = fasttime.Now().UnixFloor(300)
 	var key = strconv.FormatInt(timestamp, 10) + strconv.FormatInt(serverId, 10)
@@ -153,6 +173,14 @@ func (this *TrafficStatManager) Add(userId int64, serverId int64, domain string,
 
 		domainItem, ok := serverDomainMap[domainKey]
 		if !ok {
+			// Wildcard sites can receive an unlimited number of attacker-chosen
+			// Host values. The existing top-20 report must not allocate one bucket
+			// per unique Host before the upload timer runs.
+			if len(serverDomainMap) >= maxBufferedDomainsPerServer {
+				this.droppedDomainSamples.Add(1)
+				this.locker.Unlock()
+				return
+			}
 			domainItem = &TrafficItem{}
 			serverDomainMap[domainKey] = domainItem
 		}
@@ -169,15 +197,15 @@ func (this *TrafficStatManager) Add(userId int64, serverId int64, domain string,
 
 // Upload 上传流量
 func (this *TrafficStatManager) Upload() error {
+	this.uploadLocker.Lock()
+	defer this.uploadLocker.Unlock()
+	// Always drain durable work before admitting new data. A full disk spool must
+	// remain recoverable when the API comes back online.
+	sendErr := this.sendPending()
 	var regionId int64
 	nodeConfig, _ := nodeconfigs.SharedNodeConfig()
 	if nodeConfig != nil {
 		regionId = nodeConfig.RegionId
-	}
-
-	client, err := rpc.SharedRPC()
-	if err != nil {
-		return err
 	}
 
 	this.locker.Lock()
@@ -191,114 +219,176 @@ func (this *TrafficStatManager) Upload() error {
 
 	this.locker.Unlock()
 
-	// 服务统计
-	var pbServerStats = []*pb.ServerDailyStat{}
+	defer func() {
+		{
+			// Disk-full / serialization errors must not discard collected traffic.
+			this.locker.Lock()
+			defer this.locker.Unlock()
+			for key, item := range itemMap {
+				if current := this.itemMap[key]; current != nil {
+					current.Add(item)
+				} else {
+					this.itemMap[key] = item
+				}
+			}
+			for serverID, domains := range domainMap {
+				if this.domainsMap[serverID] == nil {
+					this.domainsMap[serverID] = map[string]*TrafficItem{}
+				}
+				for key, item := range domains {
+					if current := this.domainsMap[serverID][key]; current != nil {
+						current.Add(item)
+					} else if len(this.domainsMap[serverID]) >= maxBufferedDomainsPerServer {
+						this.droppedDomainSamples.Add(uint64(max(item.CountRequests, 1)))
+					} else {
+						this.domainsMap[serverID][key] = item
+					}
+				}
+			}
+		}
+	}()
+
+	const maxRecords = 1000
+	const maxPayload = 1 << 20
+	request := &pb.UploadServerDailyStatsRequest{}
+	var commits []func()
+	var estimatedBytes int
+	flush := func() error {
+		if len(commits) == 0 {
+			return nil
+		}
+		payload, err := (proto.MarshalOptions{Deterministic: true}).Marshal(request)
+		if err != nil {
+			return err
+		}
+		id, err := this.batchSpool.Append(payload)
+		if id != "" {
+			// Rename published the original identity even if directory fsync failed.
+			// Never merge these deltas back and assign a new ID on retry.
+			for _, commit := range commits {
+				commit()
+			}
+		}
+		request = &pb.UploadServerDailyStatsRequest{}
+		commits = nil
+		estimatedBytes = 0
+		return err
+	}
+	admit := func(size int) error {
+		if len(commits) >= maxRecords || estimatedBytes+size+16 > maxPayload {
+			return flush()
+		}
+		return nil
+	}
 	for key, item := range itemMap {
+		if len(key) <= 10 {
+			return errors.New("invalid traffic statistics key")
+		}
 		timestamp, err := strconv.ParseInt(key[:10], 10, 64)
 		if err != nil {
 			return err
 		}
-		serverId, err := strconv.ParseInt(key[10:], 10, 64)
+		serverID, err := strconv.ParseInt(key[10:], 10, 64)
 		if err != nil {
 			return err
 		}
-
-		pbServerStats = append(pbServerStats, &pb.ServerDailyStat{
-			UserId:               item.UserId,
-			ServerId:             serverId,
-			NodeRegionId:         regionId,
-			Bytes:                item.Bytes,
-			CachedBytes:          item.CachedBytes,
-			CountRequests:        item.CountRequests,
-			CountCachedRequests:  item.CountCachedRequests,
-			CountAttackRequests:  item.CountAttackRequests,
-			AttackBytes:          item.AttackBytes,
-			CheckTrafficLimiting: item.CheckingTrafficLimit,
-			PlanId:               item.PlanId,
-			CreatedAt:            timestamp,
-		})
+		stat := &pb.ServerDailyStat{
+			UserId: item.UserId, ServerId: serverID, NodeRegionId: regionId,
+			Bytes: item.Bytes, CachedBytes: item.CachedBytes,
+			CountRequests: item.CountRequests, CountCachedRequests: item.CountCachedRequests,
+			CountAttackRequests: item.CountAttackRequests, AttackBytes: item.AttackBytes,
+			CheckTrafficLimiting: item.CheckingTrafficLimit, PlanId: item.PlanId, CreatedAt: timestamp,
+		}
+		if err := admit(proto.Size(stat)); err != nil {
+			return errors.Join(sendErr, err)
+		}
+		request.Stats = append(request.Stats, stat)
+		estimatedBytes += proto.Size(stat) + 16
+		commits = append(commits, func() { delete(itemMap, key) })
 	}
-
-	// 域名统计
+	// Domain breakdowns intentionally keep the existing top-20 sampling policy;
+	// the separate server totals above remain complete for billing.
 	const maxDomainsPerServer = 20
-	var pbDomainStats = []*pb.UploadServerDailyStatsRequest_DomainStat{}
-	for serverId, serverDomainMap := range domainMap {
-		// 如果超过单个服务最大值，则只取前N个
-		var shouldTrim = len(serverDomainMap) > maxDomainsPerServer
-		var tempItems []*pb.UploadServerDailyStatsRequest_DomainStat
-
-		for key, item := range serverDomainMap {
-			var pieces = strings.SplitN(key, "@", 2)
-			if len(pieces) != 2 {
-				continue
-			}
-
-			// 修正数据
-			if item.CachedBytes > item.Bytes || item.CountCachedRequests == item.CountRequests {
-				item.CachedBytes = item.Bytes
-			}
-
-			var pbItem = &pb.UploadServerDailyStatsRequest_DomainStat{
-				ServerId:            serverId,
-				Domain:              pieces[1],
-				Bytes:               item.Bytes,
-				CachedBytes:         item.CachedBytes,
-				CountRequests:       item.CountRequests,
-				CountCachedRequests: item.CountCachedRequests,
-				CountAttackRequests: item.CountAttackRequests,
-				AttackBytes:         item.AttackBytes,
-				CreatedAt:           types.Int64(pieces[0]),
-			}
-			if !shouldTrim {
-				pbDomainStats = append(pbDomainStats, pbItem)
-			} else {
-				tempItems = append(tempItems, pbItem)
-			}
+	for serverID, domains := range domainMap {
+		keys := make([]string, 0, len(domains))
+		for key := range domains {
+			keys = append(keys, key)
 		}
-
-		if shouldTrim {
-			sort.Slice(tempItems, func(i, j int) bool {
-				return tempItems[i].CountRequests > tempItems[j].CountRequests
-			})
-
-			pbDomainStats = append(pbDomainStats, tempItems[:maxDomainsPerServer]...)
+		sort.Slice(keys, func(i, j int) bool { return domains[keys[i]].CountRequests > domains[keys[j]].CountRequests })
+		if len(keys) > maxDomainsPerServer {
+			for _, key := range keys[maxDomainsPerServer:] {
+				delete(domains, key)
+			}
+			keys = keys[:maxDomainsPerServer]
+		}
+		for _, key := range keys {
+			item := domains[key]
+			parts := strings.SplitN(key, "@", 2)
+			if len(parts) != 2 {
+				return errors.New("invalid domain statistics key")
+			}
+			stat := &pb.UploadServerDailyStatsRequest_DomainStat{
+				ServerId: serverID, Domain: parts[1], Bytes: item.Bytes,
+				CachedBytes: item.CachedBytes, CountRequests: item.CountRequests,
+				CountCachedRequests: item.CountCachedRequests, CountAttackRequests: item.CountAttackRequests,
+				AttackBytes: item.AttackBytes, CreatedAt: types.Int64(parts[0]),
+			}
+			if stat.CachedBytes > stat.Bytes || stat.CountCachedRequests == stat.CountRequests {
+				stat.CachedBytes = stat.Bytes
+			}
+			if err := admit(proto.Size(stat)); err != nil {
+				return errors.Join(sendErr, err)
+			}
+			request.DomainStats = append(request.DomainStats, stat)
+			estimatedBytes += proto.Size(stat) + 16
+			commits = append(commits, func() { delete(domains, key) })
 		}
 	}
+	appendErr := flush()
+	// Even an append/capacity failure must not prevent draining existing work.
+	return errors.Join(appendErr, this.sendPending())
+}
 
-	// 历史未提交记录
-	if len(this.pbItems) > 0 || len(this.pbDomainItems) > 0 {
-		var expiredAt = time.Now().Unix() - 1200 // 只保留20分钟
-
-		for _, item := range this.pbItems {
-			if item.CreatedAt > expiredAt {
-				pbServerStats = append(pbServerStats, item)
-			}
-		}
-		this.pbItems = nil
-
-		for _, item := range this.pbDomainItems {
-			if item.CreatedAt > expiredAt {
-				pbDomainStats = append(pbDomainStats, item)
-			}
-		}
-		this.pbDomainItems = nil
-	}
-
-	if len(pbServerStats) == 0 && len(pbDomainStats) == 0 {
-		return nil
-	}
-
-	_, err = client.ServerDailyStatRPC.UploadServerDailyStats(client.Context(), &pb.UploadServerDailyStatsRequest{
-		Stats:       pbServerStats,
-		DomainStats: pbDomainStats,
-	})
-	if err != nil {
-		// 加回历史记录
-		this.pbItems = pbServerStats
-		this.pbDomainItems = pbDomainStats
-
+func (this *TrafficStatManager) sendPending() error {
+	batches, err := this.batchSpool.Pending()
+	if err != nil || len(batches) == 0 {
 		return err
 	}
-
+	for _, batch := range batches {
+		var request pb.UploadServerDailyStatsRequest
+		if err := proto.Unmarshal(batch.Data, &request); err != nil {
+			if isolateErr := this.batchSpool.Quarantine(batch.ID, "invalid traffic protobuf: "+err.Error()); isolateErr != nil {
+				return errors.Join(err, isolateErr)
+			}
+			remotelogs.Error("TRAFFIC_STAT_MANAGER", fmt.Sprintf("quarantined corrupt traffic batch %s: %v", batch.ID, err))
+			continue
+		}
+		if this.sendBatch != nil {
+			err = this.sendBatch(context.Background(), batch.ID, &request)
+		} else {
+			client, clientErr := rpc.SharedRPC()
+			if clientErr != nil {
+				return clientErr
+			}
+			ctx, cancel := context.WithTimeout(client.Context(), 30*time.Second)
+			ctx = metadata.AppendToOutgoingContext(ctx, "x-edge-stat-batch", batch.ID)
+			_, err = client.ServerDailyStatRPC.UploadServerDailyStats(ctx, &request)
+			cancel()
+		}
+		if err != nil {
+			switch status.Code(err) {
+			case codes.InvalidArgument, codes.PermissionDenied, codes.DataLoss:
+				if isolateErr := this.batchSpool.Quarantine(batch.ID, err.Error()); isolateErr != nil {
+					return errors.Join(err, isolateErr)
+				}
+				remotelogs.Error("TRAFFIC_STAT_MANAGER", fmt.Sprintf("traffic batch %s requires operator review: %v", batch.ID, err))
+				continue
+			}
+			return err
+		}
+		if err := this.batchSpool.Ack(batch.ID); err != nil {
+			return err
+		}
+	}
 	return nil
 }

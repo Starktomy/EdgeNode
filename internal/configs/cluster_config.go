@@ -4,7 +4,7 @@ import (
 	"os"
 
 	"github.com/iwind/TeaGo/Tea"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // ClusterConfig 集群配置

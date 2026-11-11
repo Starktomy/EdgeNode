@@ -4,6 +4,7 @@ package nodes
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 
@@ -17,7 +18,12 @@ func (this *HTTPRequest) doAuth() (shouldStop bool) {
 	}
 
 	for _, ref := range this.web.Auth.PolicyRefs {
-		if !ref.IsOn || ref.AuthPolicy == nil || !ref.AuthPolicy.IsOn {
+		if ref == nil || ref.IsOn && ref.AuthPolicy == nil {
+			this.addError(errors.New("authentication policy reference is unavailable"))
+			this.writer.Send(http.StatusServiceUnavailable, "Authentication policy unavailable")
+			return true
+		}
+		if !ref.IsOn || !ref.AuthPolicy.IsOn {
 			continue
 		}
 		if !ref.AuthPolicy.MatchRequest(this.RawReq) {
@@ -37,8 +43,9 @@ func (this *HTTPRequest) doAuth() (shouldStop bool) {
 			return writer.StatusCode(), nil
 		}, this.Format)
 		if err != nil {
-			this.write50x(err, http.StatusInternalServerError, "Failed to execute the AuthPolicy", "认证策略执行失败", false)
-			return
+			this.addError(err)
+			this.writer.Send(http.StatusInternalServerError, "Authentication policy failed")
+			return true
 		}
 		if ok {
 			if uriChanged {

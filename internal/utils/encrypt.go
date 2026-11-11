@@ -6,7 +6,9 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 
@@ -15,14 +17,21 @@ import (
 	"github.com/TeaOSLab/EdgeNode/internal/events"
 	"github.com/iwind/TeaGo/logs"
 	"github.com/iwind/TeaGo/maps"
-	"github.com/iwind/TeaGo/rands"
 	stringutil "github.com/iwind/TeaGo/utils/string"
 )
 
 var (
-	defaultNodeEncryptKey    = rands.HexString(32)
-	defaultClusterEncryptKey = rands.HexString(32)
+	defaultNodeEncryptKey    = randomEncryptionKey()
+	defaultClusterEncryptKey = randomEncryptionKey()
 )
+
+func randomEncryptionKey() string {
+	var data [16]byte
+	if _, err := rand.Read(data[:]); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(data[:])
+}
 
 var encryptV2Suffix = []byte("$v2")
 

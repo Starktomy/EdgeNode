@@ -48,7 +48,7 @@ func (this *TrimDisksTask) loop() error {
 		return nil
 	}
 
-	var nodeConfig = sharedNodeConfig
+	var nodeConfig = currentNodeConfig()
 	if nodeConfig == nil {
 		return nil
 	}

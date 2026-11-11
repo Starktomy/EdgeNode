@@ -25,6 +25,7 @@ import (
 	"github.com/TeaOSLab/EdgeCommon/pkg/serverconfigs"
 	"github.com/TeaOSLab/EdgeNode/internal/caches"
 	"github.com/TeaOSLab/EdgeNode/internal/compressions"
+	"github.com/TeaOSLab/EdgeNode/internal/httpcache"
 	"github.com/TeaOSLab/EdgeNode/internal/remotelogs"
 	"github.com/TeaOSLab/EdgeNode/internal/utils"
 	"github.com/TeaOSLab/EdgeNode/internal/utils/fasttime"
@@ -172,6 +173,15 @@ func (this *HTTPWriter) PrepareCache(resp *http.Response, size int64) {
 	if cacheRef == nil || !cacheRef.IsOn {
 		return
 	}
+	this.Header().Del(httpcache.VaryMetadataHeader)
+	if !httpcache.SharedResponseAllowed(this.req.cacheRequestHeader, this.Header()) {
+		this.req.varMapping["cache.status"] = "BYPASS"
+		return
+	}
+	if _, ok := httpcache.EncodeVary(this.Header(), this.req.cacheRequestHeader); !ok {
+		this.req.varMapping["cache.status"] = "BYPASS"
+		return
+	}
 
 	var addStatusHeader = this.req.web != nil && this.req.web.Cache != nil && this.req.web.Cache.AddStatusHeader
 
@@ -288,16 +298,11 @@ func (this *HTTPWriter) PrepareCache(resp *http.Response, size int64) {
 
 	// 支持源站设置的max-age
 	if this.req.web.Cache != nil && this.req.web.Cache.EnableCacheControlMaxAge {
-		var cacheControl = this.GetHeader("Cache-Control")
-		var pieces = strings.Split(cacheControl, ";")
-		for _, piece := range pieces {
-			var eqIndex = strings.Index(piece, "=")
-			if eqIndex > 0 && piece[:eqIndex] == "max-age" {
-				var maxAge = types.Int64(piece[eqIndex+1:])
-				if maxAge > 0 {
-					life = maxAge
-				}
-			}
+		var cacheable bool
+		life, cacheable = httpcache.Lifetime(this.Header(), life)
+		if !cacheable {
+			this.req.varMapping["cache.status"] = "BYPASS"
+			return
 		}
 	}
 
@@ -399,6 +404,7 @@ func (this *HTTPWriter) PrepareCache(resp *http.Response, size int64) {
 			}
 		}
 	}
+	this.appendVaryMetadata(headerBuf)
 	_, err = cacheWriter.WriteHeader(headerBuf.Bytes())
 	utils.SharedBufferPool.Put(headerBuf)
 	if err != nil {
@@ -689,7 +695,7 @@ func (this *HTTPWriter) PrepareCompression(resp *http.Response, size int64) {
 	// 需要放在compression cache writer之前
 	var header = this.rawWriter.Header()
 	header.Set("Content-Encoding", compressionEncoding)
-	header.Set("Vary", "Accept-Encoding")
+	httpcache.MergeVary(header, "Accept-Encoding")
 	header.Del("Content-Length")
 
 	// compression cache writer
@@ -737,6 +743,7 @@ func (this *HTTPWriter) PrepareCompression(resp *http.Response, size int64) {
 				}
 			}
 		}
+		this.appendVaryMetadata(headerBuf)
 		_, err = compressionCacheWriter.WriteHeader(headerBuf.Bytes())
 		utils.SharedBufferPool.Put(headerBuf)
 		if err != nil {
@@ -983,6 +990,12 @@ func (this *HTTPWriter) SetOk() {
 
 // Close 关闭
 func (this *HTTPWriter) Close() {
+	defer func() {
+		if this.req.cacheFillRelease != nil {
+			this.req.cacheFillRelease()
+			this.req.cacheFillRelease = nil
+		}
+	}()
 	this.finishWebP()
 	this.finishRequest()
 	this.finishCache()
@@ -1071,6 +1084,14 @@ func (this *HTTPWriter) finishWebP() {
 			}
 
 			webpCacheWriter, _ = this.cacheStorage.OpenWriter(cacheKey, expiredAt, this.StatusCode(), -1, -1, -1, false)
+			if webpCacheWriter != nil {
+				var metadata bytes.Buffer
+				this.appendVaryMetadata(&metadata)
+				if _, err := webpCacheWriter.WriteHeader(metadata.Bytes()); err != nil {
+					_ = webpCacheWriter.Discard()
+					webpCacheWriter = nil
+				}
+			}
 			if webpCacheWriter != nil {
 				// 写入Header
 				for k, v := range this.Header() {
@@ -1316,12 +1337,22 @@ func (this *HTTPWriter) calculateHeaderLength() (result int) {
 			result += len(k) + 1 /**:**/ + len(v1) + 1 /**\n**/
 		}
 	}
+	var metadata bytes.Buffer
+	this.appendVaryMetadata(&metadata)
+	result += metadata.Len()
 	return
+}
+
+func (this *HTTPWriter) appendVaryMetadata(writer interface{ WriteString(string) (int, error) }) {
+	metadata, ok := httpcache.EncodeVary(this.Header(), this.req.cacheRequestHeader)
+	if ok && metadata != "" {
+		_, _ = writer.WriteString(httpcache.VaryMetadataHeader + ":" + metadata + "\n")
+	}
 }
 
 func (this *HTTPWriter) shouldIgnoreHeader(name string) bool {
 	switch name {
-	case "Set-Cookie", "Strict-Transport-Security", "Alt-Svc", "Upgrade", "X-Cache":
+	case "Set-Cookie", "Strict-Transport-Security", "Alt-Svc", "Upgrade", "X-Cache", httpcache.VaryMetadataHeader:
 		return true
 	default:
 		return this.isPartial && name == "Content-Range"

@@ -71,7 +71,7 @@ func (this *NodeStatusExecutor) Listen() {
 }
 
 func (this *NodeStatusExecutor) update() {
-	if sharedNodeConfig == nil {
+	if currentNodeConfig() == nil {
 		return
 	}
 
@@ -84,7 +84,7 @@ func (this *NodeStatusExecutor) update() {
 	status.OS = runtime.GOOS
 	status.Arch = runtime.GOARCH
 	status.ExePath, _ = os.Executable()
-	status.ConfigVersion = sharedNodeConfig.Version
+	status.ConfigVersion = currentNodeConfig().Version
 	status.IsActive = true
 	status.ConnectionCount = sharedListenerManager.TotalActiveConnections()
 	status.CacheTotalDiskSize = caches.SharedManager.TotalDiskSize()
@@ -208,7 +208,7 @@ func (this *NodeStatusExecutor) updateCPU(status *nodeconfigs.NodeStatus) {
 
 // 更新硬盘
 func (this *NodeStatusExecutor) updateDisk(status *nodeconfigs.NodeStatus) {
-	status.DiskWritingSpeedMB = int(fsutils.DiskSpeedMB)
+	status.DiskWritingSpeedMB = int(fsutils.DiskWritingSpeedMB())
 
 	partitions, err := disk.Partitions(false)
 	if err != nil {

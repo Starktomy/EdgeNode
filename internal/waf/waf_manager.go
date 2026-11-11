@@ -1,11 +1,13 @@
 package waf
 
 import (
+	"errors"
+	"fmt"
+	"reflect"
 	"strconv"
 	"sync"
 
 	"github.com/TeaOSLab/EdgeCommon/pkg/serverconfigs/firewallconfigs"
-	"github.com/TeaOSLab/EdgeNode/internal/errors"
 	"github.com/TeaOSLab/EdgeNode/internal/remotelogs"
 )
 
@@ -13,8 +15,9 @@ var SharedWAFManager = NewWAFManager()
 
 // WAFManager WAF管理器
 type WAFManager struct {
-	mapping map[int64]*WAF // policyId => WAF
-	locker  sync.RWMutex
+	mapping      map[int64]*WAF // policyId => WAF
+	locker       sync.RWMutex
+	updateLocker sync.Mutex
 }
 
 // NewWAFManager 获取新对象
@@ -25,22 +28,55 @@ func NewWAFManager() *WAFManager {
 }
 
 // UpdatePolicies 更新策略
-func (this *WAFManager) UpdatePolicies(policies []*firewallconfigs.HTTPFirewallPolicy) {
-	this.locker.Lock()
-	defer this.locker.Unlock()
+func (this *WAFManager) UpdatePolicies(policies []*firewallconfigs.HTTPFirewallPolicy) error {
+	this.updateLocker.Lock()
+	defer this.updateLocker.Unlock()
 
-	m := map[int64]*WAF{}
-	for _, p := range policies {
-		w, err := this.ConvertWAF(p)
-		if w != nil {
-			m[p.Id] = w
-		}
-		if err != nil {
-			remotelogs.Error("WAF", "initialize policy '"+strconv.FormatInt(p.Id, 10)+"' failed: "+err.Error())
+	mapping, err := this.compilePolicies(policies)
+	if err != nil {
+		remotelogs.Error("WAF", "reject policy update: "+err.Error())
+		return err
+	}
+	this.locker.Lock()
+	this.mapping = mapping
+	this.locker.Unlock()
+	return nil
+}
+
+// ValidatePolicies compiles a candidate without changing the active policies.
+func (this *WAFManager) ValidatePolicies(policies []*firewallconfigs.HTTPFirewallPolicy) error {
+	_, err := this.compilePolicies(policies)
+	return err
+}
+
+func (this *WAFManager) compilePolicies(policies []*firewallconfigs.HTTPFirewallPolicy) (map[int64]*WAF, error) {
+	var mapping = make(map[int64]*WAF, len(policies))
+	var seen = make(map[int64]*firewallconfigs.HTTPFirewallPolicy, len(policies))
+	var failures []error
+	for index, policy := range policies {
+		if policy == nil {
+			failures = append(failures, fmt.Errorf("policy at index %d is nil", index))
 			continue
 		}
+		if previous, exists := seen[policy.Id]; exists {
+			// Shared policies may be referenced by multiple sites or locations.
+			if !reflect.DeepEqual(previous, policy) {
+				failures = append(failures, fmt.Errorf("conflicting policies share id %d", policy.Id))
+			}
+			continue
+		}
+		seen[policy.Id] = policy
+		compiled, err := this.ConvertWAF(policy)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("initialize policy %s: %w", strconv.FormatInt(policy.Id, 10), err))
+			continue
+		}
+		mapping[policy.Id] = compiled
 	}
-	this.mapping = m
+	if len(failures) > 0 {
+		return nil, errors.Join(failures...)
+	}
+	return mapping, nil
 }
 
 // FindWAF 查找WAF
@@ -56,14 +92,15 @@ func (this *WAFManager) ConvertWAF(policy *firewallconfigs.HTTPFirewallPolicy) (
 	if policy == nil {
 		return nil, errors.New("policy should not be nil")
 	}
-	if len(policy.Mode) == 0 {
-		policy.Mode = firewallconfigs.FirewallModeDefend
+	var mode = policy.Mode
+	if len(mode) == 0 {
+		mode = firewallconfigs.FirewallModeDefend
 	}
 	var w = &WAF{
 		Id:               policy.Id,
 		IsOn:             policy.IsOn,
 		Name:             policy.Name,
-		Mode:             policy.Mode,
+		Mode:             mode,
 		UseLocalFirewall: policy.UseLocalFirewall,
 		SYNFlood:         policy.SYNFlood,
 	}
@@ -85,6 +122,9 @@ func (this *WAFManager) ConvertWAF(policy *firewallconfigs.HTTPFirewallPolicy) (
 
 		// groups
 		for _, group := range policy.Inbound.Groups {
+			if group == nil {
+				return nil, errors.New("inbound rule group should not be nil")
+			}
 			g := &RuleGroup{
 				Id:          group.Id,
 				IsOn:        group.IsOn,
@@ -96,6 +136,9 @@ func (this *WAFManager) ConvertWAF(policy *firewallconfigs.HTTPFirewallPolicy) (
 
 			// rule sets
 			for _, set := range group.Sets {
+				if set == nil {
+					return nil, errors.New("inbound rule set should not be nil")
+				}
 				var s = &RuleSet{
 					Id:                 set.Id,
 					Code:               set.Code,
@@ -107,11 +150,17 @@ func (this *WAFManager) ConvertWAF(policy *firewallconfigs.HTTPFirewallPolicy) (
 					IgnoreSearchEngine: set.IgnoreSearchEngine,
 				}
 				for _, a := range set.Actions {
+					if a == nil {
+						return nil, errors.New("inbound action should not be nil")
+					}
 					s.AddAction(a.Code, a.Options)
 				}
 
 				// rules
 				for _, rule := range set.Rules {
+					if rule == nil {
+						return nil, errors.New("inbound rule should not be nil")
+					}
 					r := &Rule{
 						Id:                rule.Id,
 						Description:       rule.Description,
@@ -124,6 +173,9 @@ func (this *WAFManager) ConvertWAF(policy *firewallconfigs.HTTPFirewallPolicy) (
 					}
 
 					for _, paramFilter := range rule.ParamFilters {
+						if paramFilter == nil {
+							return nil, errors.New("parameter filter should not be nil")
+						}
 						r.ParamFilters = append(r.ParamFilters, &ParamFilter{
 							Code:    paramFilter.Code,
 							Options: paramFilter.Options,
@@ -143,6 +195,9 @@ func (this *WAFManager) ConvertWAF(policy *firewallconfigs.HTTPFirewallPolicy) (
 	// outbound
 	if policy.Outbound != nil && policy.Outbound.IsOn {
 		for _, group := range policy.Outbound.Groups {
+			if group == nil {
+				return nil, errors.New("outbound rule group should not be nil")
+			}
 			g := &RuleGroup{
 				Id:          group.Id,
 				IsOn:        group.IsOn,
@@ -154,6 +209,9 @@ func (this *WAFManager) ConvertWAF(policy *firewallconfigs.HTTPFirewallPolicy) (
 
 			// rule sets
 			for _, set := range group.Sets {
+				if set == nil {
+					return nil, errors.New("outbound rule set should not be nil")
+				}
 				var s = &RuleSet{
 					Id:                 set.Id,
 					Code:               set.Code,
@@ -166,11 +224,17 @@ func (this *WAFManager) ConvertWAF(policy *firewallconfigs.HTTPFirewallPolicy) (
 				}
 
 				for _, a := range set.Actions {
+					if a == nil {
+						return nil, errors.New("outbound action should not be nil")
+					}
 					s.AddAction(a.Code, a.Options)
 				}
 
 				// rules
 				for _, rule := range set.Rules {
+					if rule == nil {
+						return nil, errors.New("outbound rule should not be nil")
+					}
 					r := &Rule{
 						Id:                rule.Id,
 						Description:       rule.Description,
@@ -261,7 +325,7 @@ func (this *WAFManager) ConvertWAF(policy *firewallconfigs.HTTPFirewallPolicy) (
 
 	errorList := w.Init()
 	if len(errorList) > 0 {
-		return w, errorList[0]
+		return nil, errors.Join(errorList...)
 	}
 
 	return w, nil

@@ -10,6 +10,8 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	teaconst "github.com/TeaOSLab/EdgeNode/internal/const"
@@ -32,9 +34,12 @@ type SQLiteFileListDB struct {
 
 	itemsTableName string
 
-	isClosed        bool // 是否已关闭
-	isReady         bool // 是否已完成初始化
-	hashMapIsLoaded bool // Hash是否已加载
+	isClosed        atomic.Bool // 是否已关闭
+	isReady         atomic.Bool // 是否已完成初始化
+	hashMapIsLoaded atomic.Bool // Hash是否已加载
+
+	loadWorkers sync.WaitGroup
+	loadMu      sync.Mutex
 
 	// cacheItems
 	existsByHashStmt *dbs.Stmt // 根据hash检查是否存在
@@ -63,6 +68,7 @@ func NewSQLiteFileListDB() *SQLiteFileListDB {
 
 func (this *SQLiteFileListDB) Open(dbPath string) error {
 	this.dbPath = dbPath
+	this.isClosed.Store(false)
 
 	// 动态调整Cache值
 	var cacheSize = 512
@@ -178,16 +184,24 @@ func (this *SQLiteFileListDB) Init() error {
 		return err
 	}
 
-	this.isReady = true
+	this.isReady.Store(true)
 
 	// 加载HashMap
-	go this.loadHashMap()
+	this.loadMu.Lock()
+	if !this.isClosed.Load() {
+		this.loadWorkers.Add(1)
+		go func() {
+			defer this.loadWorkers.Done()
+			this.loadHashMap()
+		}()
+	}
+	this.loadMu.Unlock()
 
 	return nil
 }
 
 func (this *SQLiteFileListDB) IsReady() bool {
-	return this.isReady
+	return this.isReady.Load()
 }
 
 func (this *SQLiteFileListDB) Total() (int64, error) {
@@ -227,7 +241,7 @@ func (this *SQLiteFileListDB) DeleteSync(hash string) error {
 }
 
 func (this *SQLiteFileListDB) ListExpiredItems(count int) (hashList []string, err error) {
-	if !this.isReady {
+	if !this.isReady.Load() {
 		return nil, nil
 	}
 
@@ -255,7 +269,7 @@ func (this *SQLiteFileListDB) ListExpiredItems(count int) (hashList []string, er
 }
 
 func (this *SQLiteFileListDB) ListLFUItems(count int) (hashList []string, err error) {
-	if !this.isReady {
+	if !this.isReady.Load() {
 		return nil, nil
 	}
 
@@ -309,7 +323,7 @@ func (this *SQLiteFileListDB) IncreaseHitAsync(hash string) error {
 }
 
 func (this *SQLiteFileListDB) CleanPrefix(prefix string) error {
-	if !this.isReady {
+	if !this.isReady.Load() {
 		return nil
 	}
 	var count = int64(10000)
@@ -330,7 +344,7 @@ func (this *SQLiteFileListDB) CleanPrefix(prefix string) error {
 }
 
 func (this *SQLiteFileListDB) CleanMatchKey(key string) error {
-	if !this.isReady {
+	if !this.isReady.Load() {
 		return nil
 	}
 
@@ -375,7 +389,7 @@ func (this *SQLiteFileListDB) CleanMatchKey(key string) error {
 }
 
 func (this *SQLiteFileListDB) CleanMatchPrefix(prefix string) error {
-	if !this.isReady {
+	if !this.isReady.Load() {
 		return nil
 	}
 
@@ -407,7 +421,7 @@ func (this *SQLiteFileListDB) CleanMatchPrefix(prefix string) error {
 }
 
 func (this *SQLiteFileListDB) CleanAll() error {
-	if !this.isReady {
+	if !this.isReady.Load() {
 		return nil
 	}
 
@@ -422,12 +436,14 @@ func (this *SQLiteFileListDB) CleanAll() error {
 }
 
 func (this *SQLiteFileListDB) Close() error {
-	if this.isClosed {
+	this.loadMu.Lock()
+	if this.isClosed.Swap(true) {
+		this.loadMu.Unlock()
 		return nil
 	}
-
-	this.isClosed = true
-	this.isReady = false
+	this.isReady.Store(false)
+	this.loadMu.Unlock()
+	this.loadWorkers.Wait()
 
 	if this.existsByHashStmt != nil {
 		_ = this.existsByHashStmt.Close()
@@ -487,7 +503,7 @@ func (this *SQLiteFileListDB) WrapError(err error) error {
 }
 
 func (this *SQLiteFileListDB) HashMapIsLoaded() bool {
-	return this.hashMapIsLoaded
+	return this.hashMapIsLoaded.Load()
 }
 
 // 初始化
@@ -602,27 +618,17 @@ func (this *SQLiteFileListDB) deleteDB() {
 
 // 加载Hash列表
 func (this *SQLiteFileListDB) loadHashMap() {
-	this.hashMapIsLoaded = false
+	this.hashMapIsLoaded.Store(false)
 
 	err := this.hashMap.Load(this)
 	if err != nil {
 		remotelogs.Error("LIST_FILE_DB", "load hash map failed: "+err.Error()+"(file: "+this.dbPath+")")
 
-		// 自动修复错误
-		// TODO 将来希望能尽可能恢复以往数据库中的内容
-		if strings.Contains(err.Error(), "database is closed") || strings.Contains(err.Error(), "database disk image is malformed") {
-			_ = this.Close()
-			this.deleteDB()
-			remotelogs.Println("LIST_FILE_DB", "recreating the database (file:"+this.dbPath+") ...")
-			err = this.Open(this.dbPath)
-			if err != nil {
-				remotelogs.Error("LIST_FILE_DB", "recreate the database failed: "+err.Error()+" (file:"+this.dbPath+")")
-			} else {
-				_ = this.Init()
-			}
-		}
+		// An optional hash accelerator failure must not delete the persistent
+		// cache index or race a caller closing it. Fall back to SQL lookups.
+		this.hashMap.SetIsAvailable(false)
 		return
 	}
 
-	this.hashMapIsLoaded = true
+	this.hashMapIsLoaded.Store(true)
 }

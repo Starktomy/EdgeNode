@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"time"
 
 	"github.com/TeaOSLab/EdgeCommon/pkg/configutils"
 	"github.com/TeaOSLab/EdgeCommon/pkg/serverconfigs"
@@ -53,23 +54,10 @@ func OriginConnect(origin *serverconfigs.OriginConfig, serverPort int, remoteAdd
 						// TODO 支持TCP4/TCP6
 						// TODO 支持指定特定网卡
 
-						var tlsConfig = &tls.Config{
-							InsecureSkipVerify: true,
+						tlsConfig, configErr := originTLSConfig(origin, tlsHost)
+						if configErr != nil {
+							return nil, originAddr, configErr
 						}
-						if origin.Cert != nil {
-							var obj = origin.Cert.CertObject()
-							if obj != nil {
-								tlsConfig.InsecureSkipVerify = false
-								tlsConfig.Certificates = []tls.Certificate{*obj}
-								if len(origin.Cert.ServerName) > 0 {
-									tlsConfig.ServerName = origin.Cert.ServerName
-								}
-							}
-						}
-						if len(tlsHost) > 0 {
-							tlsConfig.ServerName = tlsHost
-						}
-
 						conn, err = tls.DialWithDialer(&dialer, "tcp", originAddr, tlsConfig)
 					}
 
@@ -99,24 +87,15 @@ func OriginConnect(origin *serverconfigs.OriginConfig, serverPort int, remoteAdd
 		// TODO 支持TCP4/TCP6
 		// TODO 支持指定特定网卡
 
-		var tlsConfig = &tls.Config{
-			InsecureSkipVerify: true,
+		tlsConfig, configErr := originTLSConfig(origin, tlsHost)
+		if configErr != nil {
+			return nil, originAddr, configErr
 		}
-		if origin.Cert != nil {
-			var obj = origin.Cert.CertObject()
-			if obj != nil {
-				tlsConfig.InsecureSkipVerify = false
-				tlsConfig.Certificates = []tls.Certificate{*obj}
-				if len(origin.Cert.ServerName) > 0 {
-					tlsConfig.ServerName = origin.Cert.ServerName
-				}
-			}
+		timeout := origin.ConnTimeoutDuration()
+		if timeout <= 0 {
+			timeout = 15 * time.Second
 		}
-		if len(tlsHost) > 0 {
-			tlsConfig.ServerName = tlsHost
-		}
-
-		originConn, err = tls.Dial("tcp", originAddr, tlsConfig)
+		originConn, err = tls.DialWithDialer(&net.Dialer{Timeout: timeout}, "tcp", originAddr, tlsConfig)
 		return originConn, originAddr, err
 	case serverconfigs.ProtocolUDP:
 		addr, err := net.ResolveUDPAddr("udp", originAddr)

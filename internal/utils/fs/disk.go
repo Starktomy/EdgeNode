@@ -104,24 +104,26 @@ func CheckDiskIsFast() (speedMB float64, isFast bool, err error) {
 
 	isFast = speedMB > 150
 
-	if speedMB <= DiskSpeedMB {
+	statusMu.Lock()
+	defer statusMu.Unlock()
+	if speedMB <= diskSpeedMB {
 		return
 	}
 
 	if speedMB > 1000 {
-		DiskSpeed = SpeedExtremelyFast
+		diskSpeed = SpeedExtremelyFast
 	} else if speedMB > 150 {
-		DiskSpeed = SpeedFast
+		diskSpeed = SpeedFast
 	} else if speedMB > 60 {
-		DiskSpeed = SpeedLow
+		diskSpeed = SpeedLow
 	} else {
-		DiskSpeed = SpeedExtremelySlow
+		diskSpeed = SpeedExtremelySlow
 	}
 
-	DiskSpeedMB = speedMB
+	diskSpeedMB = speedMB
 
-	cacheInfo.Speed = DiskSpeed
-	cacheInfo.SpeedMB = DiskSpeedMB
+	cacheInfo.Speed = diskSpeed
+	cacheInfo.SpeedMB = diskSpeedMB
 
 	return
 }

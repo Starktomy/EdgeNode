@@ -7,7 +7,7 @@ import (
 
 	"github.com/TeaOSLab/EdgeNode/internal/configs"
 	"github.com/TeaOSLab/EdgeNode/internal/utils/testutils"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 func TestLoadClusterConfig(t *testing.T) {

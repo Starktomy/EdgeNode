@@ -24,6 +24,7 @@ LIBINJECTION_BEGIN_DECLS
  * Pull in size_t
  */
 #include <string.h>
+#include "libinjection_error.h"
 
 /*
  * Version info.
@@ -55,7 +56,7 @@ int libinjection_sqli(const char* s, size_t slen, char fingerprint[]);
  *
  * \param[in] s  input string, may contain nulls, does not need to be null-terminated
  * \param[in] slen input string length
- * \return 1 if XSS found, 0 if benign
+ * \return 1 if XSS found, 0 if benign, -1 on parser error
  *
  */
 int libinjection_xss(const char* s, size_t slen, int strictMode);

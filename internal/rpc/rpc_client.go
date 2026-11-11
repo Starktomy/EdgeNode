@@ -2,20 +2,18 @@ package rpc
 
 import (
 	"context"
-	"crypto/tls"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TeaOSLab/EdgeCommon/pkg/rpc/pb"
+	"github.com/TeaOSLab/EdgeCommon/pkg/rpcauth"
 	"github.com/TeaOSLab/EdgeNode/internal/configs"
-	teaconst "github.com/TeaOSLab/EdgeNode/internal/const"
 	"github.com/TeaOSLab/EdgeNode/internal/utils"
-	"github.com/TeaOSLab/EdgeNode/internal/utils/encrypt"
-	"github.com/iwind/TeaGo/maps"
 	"github.com/iwind/TeaGo/rands"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
@@ -65,7 +63,7 @@ func NewRPCClient(apiConfig *configs.APIConfig) (*RPCClient, error) {
 	}
 
 	var client = &RPCClient{
-		apiConfig: apiConfig,
+		apiConfig: copyAPIConfig(apiConfig),
 	}
 
 	// 初始化RPC实例
@@ -105,49 +103,23 @@ func NewRPCClient(apiConfig *configs.APIConfig) (*RPCClient, error) {
 
 // Context 节点上下文信息
 func (this *RPCClient) Context() context.Context {
-	var m = maps.Map{
-		"timestamp": time.Now().Unix(),
-		"type":      "node",
-		"userId":    0,
-	}
-	method, err := encrypt.NewMethodInstance(teaconst.EncryptMethod, this.apiConfig.Secret, this.apiConfig.NodeId)
-	if err != nil {
-		utils.PrintError(err)
-		return context.Background()
-	}
-	data, err := method.Encrypt(m.AsJSON())
-	if err != nil {
-		utils.PrintError(err)
-		return context.Background()
-	}
-	var token = base64.StdEncoding.EncodeToString(data)
-
-	var ctx = context.Background()
-	ctx = metadata.AppendToOutgoingContext(ctx, "nodeId", this.apiConfig.NodeId, "token", token)
-	return ctx
+	this.locker.RLock()
+	nodeID, secret := this.apiConfig.NodeId, this.apiConfig.Secret
+	this.locker.RUnlock()
+	return nodeContext(nodeID, secret, "node")
 }
 
-// ClusterContext 集群上下文
-func (this *RPCClient) ClusterContext(clusterId string, clusterSecret string) context.Context {
-	ctx := context.Background()
-	m := maps.Map{
-		"timestamp": time.Now().Unix(),
-		"type":      "cluster",
-		"userId":    0,
-	}
-	method, err := encrypt.NewMethodInstance(teaconst.EncryptMethod, clusterSecret, clusterId)
+func nodeContext(nodeID, secret, role string) context.Context {
+	token, err := rpcauth.Sign(secret, nodeID, role, 0)
 	if err != nil {
 		utils.PrintError(err)
 		return context.Background()
 	}
-	data, err := method.Encrypt(m.AsJSON())
-	if err != nil {
-		utils.PrintError(err)
-		return context.Background()
-	}
-	token := base64.StdEncoding.EncodeToString(data)
-	ctx = metadata.AppendToOutgoingContext(ctx, "nodeId", clusterId, "token", token)
-	return ctx
+	return metadata.AppendToOutgoingContext(context.Background(), "nodeId", nodeID, "token", token)
+}
+
+func (this *RPCClient) ClusterContext(clusterID, clusterSecret string) context.Context {
+	return nodeContext(clusterID, clusterSecret, "cluster")
 }
 
 // Close 关闭连接
@@ -163,12 +135,25 @@ func (this *RPCClient) Close() {
 
 // UpdateConfig 修改配置
 func (this *RPCClient) UpdateConfig(config *configs.APIConfig) error {
-	this.apiConfig = config
-
+	if config == nil {
+		return errors.New("api config should not be nil")
+	}
 	this.locker.Lock()
+	previous := this.apiConfig
+	this.apiConfig = copyAPIConfig(config)
 	err := this.init()
+	if err != nil {
+		this.apiConfig = previous
+	}
 	this.locker.Unlock()
 	return err
+}
+
+func copyAPIConfig(config *configs.APIConfig) *configs.APIConfig {
+	copy := *config
+	copy.RPCEndpoints = append([]string(nil), config.RPCEndpoints...)
+	copy.OldRPC.Endpoints = append([]string(nil), config.OldRPC.Endpoints...)
+	return &copy
 }
 
 // TestEndpoints 测试Endpoints是否可用
@@ -180,7 +165,7 @@ func (this *RPCClient) TestEndpoints(endpoints []string) bool {
 	var wg = sync.WaitGroup{}
 	wg.Add(len(endpoints))
 
-	var ok = false
+	var ok atomic.Bool
 
 	for _, endpoint := range endpoints {
 		go func(endpoint string) {
@@ -197,11 +182,16 @@ func (this *RPCClient) TestEndpoints(endpoints []string) bool {
 			}()
 			var conn *grpc.ClientConn
 			if u.Scheme == "http" {
+				if !rpcauth.PlaintextAllowed(u.Host) {
+					return
+				}
 				conn, err = grpc.DialContext(ctx, u.Host, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 			} else if u.Scheme == "https" {
-				conn, err = grpc.DialContext(ctx, u.Host, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
-					InsecureSkipVerify: true,
-				})), grpc.WithBlock())
+				tlsConfig, tlsErr := rpcauth.VerifiedTLSConfig(u.Hostname(), os.Getenv("EDGE_RPC_CA_FILE"))
+				if tlsErr != nil {
+					return
+				}
+				conn, err = grpc.DialContext(ctx, u.Host, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)), grpc.WithBlock())
 			} else {
 				return
 			}
@@ -216,27 +206,40 @@ func (this *RPCClient) TestEndpoints(endpoints []string) bool {
 			}()
 
 			var pingService = pb.NewPingServiceClient(conn)
-			_, err = pingService.Ping(this.Context(), &pb.PingRequest{})
+			pingContext, cancel := context.WithTimeout(this.Context(), 5*time.Second)
+			_, err = pingService.Ping(pingContext, &pb.PingRequest{})
+			cancel()
 			if err != nil {
 				return
 			}
 
-			ok = true
+			ok.Store(true)
 		}(endpoint)
 	}
 	wg.Wait()
 
-	return ok
+	return ok.Load()
 }
 
 // 初始化
 func (this *RPCClient) init() error {
 	// 重新连接
 	var conns = []*grpc.ClientConn{}
+	installed := false
+	defer func() {
+		if !installed {
+			for _, conn := range conns {
+				_ = conn.Close()
+			}
+		}
+	}()
 	for _, endpoint := range this.apiConfig.RPCEndpoints {
 		u, err := url.Parse(endpoint)
 		if err != nil {
 			return fmt.Errorf("parse endpoint failed: %w", err)
+		}
+		if u.Hostname() == "" || u.User != nil {
+			return errors.New("RPC endpoint requires a hostname without embedded credentials")
 		}
 		var conn *grpc.ClientConn
 		var callOptions = grpc.WithDefaultCallOptions(
@@ -248,11 +251,16 @@ func (this *RPCClient) init() error {
 			Time: 30 * time.Second,
 		})
 		if u.Scheme == "http" {
+			if !rpcauth.PlaintextAllowed(u.Host) {
+				return errors.New("plaintext RPC requires explicit loopback permission or the migration override")
+			}
 			conn, err = grpc.Dial(u.Host, grpc.WithTransportCredentials(insecure.NewCredentials()), callOptions, keepaliveParams)
 		} else if u.Scheme == "https" {
-			conn, err = grpc.Dial(u.Host, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
-				InsecureSkipVerify: true,
-			})), callOptions, keepaliveParams)
+			tlsConfig, tlsErr := rpcauth.VerifiedTLSConfig(u.Hostname(), os.Getenv("EDGE_RPC_CA_FILE"))
+			if tlsErr != nil {
+				return tlsErr
+			}
+			conn, err = grpc.Dial(u.Host, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)), callOptions, keepaliveParams)
 		} else {
 			return errors.New("parse endpoint failed: invalid scheme '" + u.Scheme + "'")
 		}
@@ -266,7 +274,12 @@ func (this *RPCClient) init() error {
 	}
 
 	// 这里不需要加锁，防止和pickConn()冲突
+	previous := this.conns
 	this.conns = conns
+	installed = true
+	for _, conn := range previous {
+		_ = conn.Close()
+	}
 	return nil
 }
 
@@ -304,6 +317,11 @@ func (this *RPCClient) pickConn() *grpc.ClientConn {
 }
 
 func (this *RPCClient) Invoke(ctx context.Context, method string, args interface{}, reply interface{}, opts ...grpc.CallOption) error {
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
 	var conn = this.pickConn()
 	if conn == nil {
 		return errors.New("could not get available grpc connection")

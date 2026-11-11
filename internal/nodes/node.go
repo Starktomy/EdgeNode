@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -53,7 +54,6 @@ import (
 	"github.com/iwind/gosock/pkg/gosock"
 )
 
-var sharedNodeConfig *nodeconfigs.NodeConfig
 var nodeTaskNotify = make(chan bool, 8)
 var nodeConfigChangedNotify = make(chan bool, 8)
 var nodeConfigUpdatedAt int64
@@ -205,9 +205,12 @@ func (this *Node) Start() {
 		for _, serverErr := range serverErrors {
 			remotelogs.ServerError(serverErr.Id, "NODE", serverErr.Message, nodeconfigs.NodeLogTypeServerConfigInitFailed, maps.Map{})
 		}
+		return
 	}
-	sharedNodeConfig = nodeConfig
-	this.onReload(nodeConfig, true)
+	if err := this.onReload(nodeConfig, true); err != nil {
+		remotelogs.Error("NODE", "configuration activation failed: "+err.Error())
+		return
+	}
 
 	// 调整系统参数
 	go this.tuneSystemParameters()
@@ -346,8 +349,12 @@ func (this *Node) syncConfig(taskVersion int64) error {
 
 	// 获取同步任务
 	// TODO 这里考虑只同步版本号有变更的
+	requestVersion := int64(-1)
+	if current := currentNodeConfig(); current != nil && this.isLoaded && taskVersion == 0 {
+		requestVersion = current.Version
+	}
 	configResp, err := rpcClient.NodeRPC.FindCurrentNodeConfig(rpcClient.Context(), &pb.FindCurrentNodeConfigRequest{
-		Version:         -1, // 更新所有版本
+		Version:         requestVersion,
 		Compress:        true,
 		NodeTaskVersion: taskVersion,
 		UseDataMap:      true,
@@ -360,23 +367,17 @@ func (this *Node) syncConfig(taskVersion int64) error {
 	}
 
 	var configJSON = configResp.NodeJSON
+	const maxConfigurationBytes = 64 << 20
 	if configResp.IsCompressed {
-		var reader = brotli.NewReader(bytes.NewReader(configJSON))
-		var configBuf = &bytes.Buffer{}
-		var buf = make([]byte, 32*1024)
-		for {
-			n, err := reader.Read(buf)
-			if n > 0 {
-				configBuf.Write(buf[:n])
-			}
-			if err != nil {
-				break
-			}
+		reader := brotli.NewReader(bytes.NewReader(configJSON))
+		configJSON, err = io.ReadAll(io.LimitReader(reader, maxConfigurationBytes+1))
+		if err != nil {
+			return fmt.Errorf("decompress configuration: %w", err)
 		}
-		configJSON = configBuf.Bytes()
 	}
-
-	nodeConfigUpdatedAt = time.Now().Unix()
+	if len(configJSON) > maxConfigurationBytes {
+		return errors.New("configuration exceeds size limit")
+	}
 
 	var nodeConfig = &nodeconfigs.NodeConfig{}
 	err = json.Unmarshal(configJSON, nodeConfig)
@@ -396,21 +397,20 @@ func (this *Node) syncConfig(taskVersion int64) error {
 		}
 	}
 
-	// 写入到文件中
-	err = nodeConfig.Save()
-	if err != nil {
-		return err
-	}
-
 	err, serverErrors := nodeConfig.Init(context.Background())
 	if err != nil {
 		return err
 	}
 	if len(serverErrors) > 0 {
-		for _, serverErr := range serverErrors {
-			remotelogs.ServerError(serverErr.Id, "NODE", serverErr.Message, nodeconfigs.NodeLogTypeServerConfigInitFailed, maps.Map{})
-		}
+		return fmt.Errorf("configuration contains %d invalid servers; preserving previous configuration", len(serverErrors))
 	}
+	if err := validateNodeCandidate(nodeConfig); err != nil {
+		return err
+	}
+	if err := persistNodeConfig(Tea.ConfigFile("node.json"), nodeConfig, configJSON); err != nil {
+		return err
+	}
+	nodeConfigUpdatedAt = time.Now().Unix()
 
 	// 刷新配置
 	if this.isLoaded {
@@ -419,7 +419,9 @@ func (this *Node) syncConfig(taskVersion int64) error {
 		remotelogs.Println("NODE", "loading node config ...")
 	}
 
-	this.onReload(nodeConfig, true)
+	if err := this.onReload(nodeConfig, true); err != nil {
+		return err
+	}
 
 	// 发送事件
 	events.Notify(events.EventReload)
@@ -880,9 +882,10 @@ func (this *Node) listenSock() error {
 }
 
 // 重载配置调用
-func (this *Node) onReload(config *nodeconfigs.NodeConfig, reloadAll bool) {
-	nodeconfigs.ResetNodeConfig(config)
-	sharedNodeConfig = config
+func (this *Node) onReload(config *nodeconfigs.NodeConfig, reloadAll bool) error {
+	if err := validateNodeCandidate(config); err != nil {
+		return err
+	}
 
 	// 并发读写数
 	fsutils.ReaderLimiter.SetThreads(config.MaxConcurrentReads)
@@ -932,6 +935,9 @@ func (this *Node) onReload(config *nodeconfigs.NodeConfig, reloadAll bool) {
 	// 包含了服务里的WAF策略，所以需要整体更新
 	var allFirewallPolicies = config.FindAllFirewallPolicies()
 	if !jsonutils.Equal(allFirewallPolicies, this.oldHTTPFirewallPolicies) {
+		if err := waf.SharedWAFManager.UpdatePolicies(allFirewallPolicies); err != nil {
+			return err
+		}
 		// copy
 		this.oldHTTPFirewallPolicies = []*firewallconfigs.HTTPFirewallPolicy{}
 		err := jsonutils.Copy(&this.oldHTTPFirewallPolicies, allFirewallPolicies)
@@ -939,8 +945,6 @@ func (this *Node) onReload(config *nodeconfigs.NodeConfig, reloadAll bool) {
 			remotelogs.Error("NODE", "onReload: copy HTTPFirewallPolicies failed: "+err.Error())
 		}
 
-		// update
-		waf.SharedWAFManager.UpdatePolicies(allFirewallPolicies)
 	}
 
 	if reloadAll {
@@ -1004,8 +1008,7 @@ func (this *Node) onReload(config *nodeconfigs.NodeConfig, reloadAll bool) {
 		if this.oldTimezone != timeZone {
 			location, err := time.LoadLocation(timeZone)
 			if err != nil {
-				remotelogs.Error("NODE", "[TIMEZONE]change time zone failed: "+err.Error())
-				return
+				return fmt.Errorf("change time zone: %w", err)
 			}
 
 			remotelogs.Println("NODE", "[TIMEZONE]change time zone to '"+timeZone+"'")
@@ -1045,8 +1048,10 @@ func (this *Node) onReload(config *nodeconfigs.NodeConfig, reloadAll bool) {
 		this.changeAPINodeAddrs(config.APINodeAddrs)
 	}
 
+	storeNodeConfig(config)
 	// 刷新IP库
 	this.reloadIPLibrary()
+	return nil
 }
 
 // reload server config
@@ -1058,8 +1063,7 @@ func (this *Node) reloadServer() {
 	const maxPrintServers = 10
 	if countUpdatingServers > 0 {
 		var updatingServerMap = this.updatingServerMap
-		this.updatingServerMap = map[int64]*serverconfigs.ServerConfig{}
-		newNodeConfig, err := nodeconfigs.CloneNodeConfig(sharedNodeConfig)
+		newNodeConfig, err := cloneNodeSnapshot(currentNodeConfig())
 		if err != nil {
 			remotelogs.Error("NODE", "apply server config error: "+err.Error())
 			return
@@ -1088,12 +1092,18 @@ func (this *Node) reloadServer() {
 			return
 		}
 		if len(serverErrors) > 0 {
-			for _, serverErr := range serverErrors {
-				remotelogs.ServerError(serverErr.Id, "NODE", serverErr.Message, nodeconfigs.NodeLogTypeServerConfigInitFailed, maps.Map{})
-			}
+			remotelogs.Error("NODE", "refusing invalid server update")
+			return
 		}
-
-		this.onReload(newNodeConfig, false)
+		if err := validateNodeWAF(newNodeConfig); err != nil {
+			remotelogs.Error("NODE", "refusing invalid WAF update: "+err.Error())
+			return
+		}
+		if err := this.onReload(newNodeConfig, false); err != nil {
+			remotelogs.Error("NODE", "activate server configuration failed: "+err.Error())
+			return
+		}
+		this.updatingServerMap = map[int64]*serverconfigs.ServerConfig{}
 
 		err = sharedListenerManager.Start(newNodeConfig)
 		if err != nil {
@@ -1111,7 +1121,7 @@ func (this *Node) tuneSystemParameters() {
 		return
 	}
 
-	if sharedNodeConfig == nil || !sharedNodeConfig.AutoSystemTuning {
+	if currentNodeConfig() == nil || !currentNodeConfig().AutoSystemTuning {
 		return
 	}
 

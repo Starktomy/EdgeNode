@@ -1,8 +1,7 @@
 package nodes
 
 import (
-	"bytes"
-	"io"
+	"errors"
 	"net/http"
 	"time"
 
@@ -12,6 +11,7 @@ import (
 	"github.com/TeaOSLab/EdgeNode/internal/remotelogs"
 	"github.com/TeaOSLab/EdgeNode/internal/stats"
 	"github.com/TeaOSLab/EdgeNode/internal/waf"
+	"github.com/TeaOSLab/EdgeNode/internal/waf/requests"
 	wafutils "github.com/TeaOSLab/EdgeNode/internal/waf/utils"
 	"github.com/iwind/TeaGo/Tea"
 	"github.com/iwind/TeaGo/types"
@@ -26,7 +26,7 @@ func (this *HTTPRequest) doWAFRequest() (blocked bool) {
 	var remoteAddr = this.requestRemoteAddr(true)
 
 	// 检查是否为白名单直连
-	if !Tea.IsTesting() && this.nodeConfig.IPIsAutoAllowed(remoteAddr) {
+	if !Tea.IsTesting() && !this.usesTrustedProxyIdentity() && this.nodeConfig.IPIsAutoAllowed(remoteAddr) {
 		return
 	}
 
@@ -37,7 +37,7 @@ func (this *HTTPRequest) doWAFRequest() (blocked bool) {
 	}
 
 	// 是否在全局名单中
-	canGoNext, isInAllowedList, _ := iplibrary.AllowIP(remoteAddr, this.ReqServer.Id)
+	canGoNext, isInAllowedList, _ := this.allowClientIP(remoteAddr)
 	if !canGoNext {
 		this.disableLog = true
 		this.Close()
@@ -355,7 +355,8 @@ func (this *HTTPRequest) checkWAFRequest(firewallPolicy *firewallconfigs.HTTPFir
 	// 规则测试
 	var w = waf.SharedWAFManager.FindWAF(firewallPolicy.Id)
 	if w == nil {
-		return
+		this.writer.Send(http.StatusServiceUnavailable, "Security policy is unavailable")
+		return true, false
 	}
 
 	result, err := w.MatchRequest(this, this.writer, this.web.FirewallRef.DefaultCaptchaType)
@@ -363,7 +364,18 @@ func (this *HTTPRequest) checkWAFRequest(firewallPolicy *firewallconfigs.HTTPFir
 		if !this.canIgnore(err) {
 			remotelogs.Warn("HTTP_REQUEST_WAF", this.rawURI+": "+err.Error())
 		}
-		return
+		var status = http.StatusInternalServerError
+		var inspectionErr *requests.InspectionError
+		if requests.IsBodyLimitError(err) {
+			status = http.StatusRequestEntityTooLarge
+		} else if errors.As(err, &inspectionErr) {
+			status = http.StatusBadRequest
+		}
+		if this.RawReq.Body != nil {
+			_ = this.RawReq.Body.Close()
+		}
+		this.writer.Send(status, "Request could not be inspected")
+		return true, false
 	}
 	if result.IsAllowed && (len(result.AllowScope) == 0 || result.AllowScope == waf.AllowScopeGlobal) {
 		breakChecking = true
@@ -443,7 +455,8 @@ func (this *HTTPRequest) checkWAFResponse(firewallPolicy *firewallconfigs.HTTPFi
 
 	var w = waf.SharedWAFManager.FindWAF(firewallPolicy.Id)
 	if w == nil {
-		return
+		this.writer.Send(http.StatusBadGateway, "Security policy is unavailable")
+		return true, false
 	}
 
 	result, err := w.MatchResponse(this, resp, this.writer)
@@ -451,7 +464,11 @@ func (this *HTTPRequest) checkWAFResponse(firewallPolicy *firewallconfigs.HTTPFi
 		if !this.canIgnore(err) {
 			remotelogs.Warn("HTTP_REQUEST_WAF", this.rawURI+": "+err.Error())
 		}
-		return
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		this.writer.Send(http.StatusBadGateway, "Response could not be inspected")
+		return true, false
 	}
 	if result.IsAllowed && (len(result.AllowScope) == 0 || result.AllowScope == waf.AllowScopeGlobal) {
 		breakChecking = true
@@ -496,28 +513,32 @@ func (this *HTTPRequest) WAFRemoteIP() string {
 
 // WAFGetCacheBody 获取缓存中的Body
 func (this *HTTPRequest) WAFGetCacheBody() []byte {
-	return this.requestBodyData
+	return this.wafRequestBodyData
 }
 
 // WAFSetCacheBody 设置Body
 func (this *HTTPRequest) WAFSetCacheBody(body []byte) {
+	this.wafRequestBodyData = body
 	this.requestBodyData = body
 }
 
 // WAFReadBody 读取Body
 func (this *HTTPRequest) WAFReadBody(max int64) (data []byte, err error) {
-	if this.RawReq.ContentLength > 0 {
-		data, err = io.ReadAll(io.LimitReader(this.RawReq.Body, max))
+	if err = this.prepareRequestBodyLimit(); err != nil {
+		return nil, requests.BodyInspectionError(err)
 	}
-
-	return
+	if this.RawWriter != nil {
+		controller := http.NewResponseController(this.RawWriter)
+		if deadlineErr := controller.SetReadDeadline(time.Now().Add(requests.MaxInspectionBodyDuration)); deadlineErr == nil {
+			defer controller.SetReadDeadline(time.Time{})
+		}
+	}
+	return requests.InspectRequestBody(this.RawReq, max)
 }
 
 // WAFRestoreBody 恢复Body
 func (this *HTTPRequest) WAFRestoreBody(data []byte) {
-	if len(data) > 0 {
-		this.RawReq.Body = io.NopCloser(io.MultiReader(bytes.NewBuffer(data), this.RawReq.Body))
-	}
+	requests.RestoreRequestBody(this.RawReq, data)
 }
 
 // WAFServerId 服务ID
@@ -572,6 +593,9 @@ func (this *HTTPRequest) WAFMaxRequestSize() int64 {
 	var maxRequestSize = firewallconfigs.DefaultMaxRequestBodySize
 	if this.ReqServer.HTTPFirewallPolicy != nil && this.ReqServer.HTTPFirewallPolicy.MaxRequestBodySize > 0 {
 		maxRequestSize = this.ReqServer.HTTPFirewallPolicy.MaxRequestBodySize
+	}
+	if this.web != nil && this.web.FirewallPolicy != nil && this.web.FirewallPolicy.MaxRequestBodySize > 0 && this.web.FirewallPolicy.MaxRequestBodySize < maxRequestSize {
+		maxRequestSize = this.web.FirewallPolicy.MaxRequestBodySize
 	}
 	return maxRequestSize
 }

@@ -116,13 +116,19 @@ func (this *HTTPListener) ServeHTTP(rawWriter http.ResponseWriter, rawReq *http.
 
 // ServeHTTPWithAddr 处理HTTP请求并指定服务地址
 func (this *HTTPListener) ServeHTTPWithAddr(rawWriter http.ResponseWriter, rawReq *http.Request, serverAddr string) {
+	nodeConfig := currentNodeConfig()
+	if nodeConfig == nil {
+		http.Error(rawWriter, "Node configuration unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
 	if len(rawReq.Host) > 253 {
 		http.Error(rawWriter, "Host too long.", http.StatusBadRequest)
 		time.Sleep(1 * time.Second) // make connection slow down
 		return
 	}
 
-	var globalServerConfig = sharedNodeConfig.GlobalServerConfig
+	var globalServerConfig = nodeConfig.GlobalServerConfig
 	if globalServerConfig != nil && !globalServerConfig.HTTPAll.SupportsLowVersionHTTP && (rawReq.ProtoMajor < 1 /** 0.x **/ || (rawReq.ProtoMajor == 1 && rawReq.ProtoMinor == 0 /** 1.0 **/)) {
 		http.Error(rawWriter, rawReq.Proto+" request is not supported.", http.StatusHTTPVersionNotSupported)
 		time.Sleep(1 * time.Second) // make connection slow down
@@ -224,7 +230,7 @@ func (this *HTTPListener) ServeHTTPWithAddr(rawWriter http.ResponseWriter, rawRe
 		IsHTTPS:    this.isHTTPS,
 		IsHTTP3:    this.isHTTP3,
 
-		nodeConfig: sharedNodeConfig,
+		nodeConfig: nodeConfig,
 	}
 	req.Do()
 
@@ -260,8 +266,8 @@ func (this *HTTPListener) emptyServer() *serverconfigs.ServerConfig {
 	}
 
 	// 检查是否开启访问日志
-	if sharedNodeConfig != nil {
-		var globalServerConfig = sharedNodeConfig.GlobalServerConfig
+	if currentNodeConfig() != nil {
+		var globalServerConfig = currentNodeConfig().GlobalServerConfig
 		if globalServerConfig != nil && globalServerConfig.HTTPAccessLog.EnableServerNotFound {
 			var accessLogRef = serverconfigs.NewHTTPAccessLogRef()
 			accessLogRef.IsOn = true

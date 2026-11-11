@@ -33,9 +33,13 @@ func (this *Node) handlePanic() {
 		}
 	}
 
-	fp, err := os.OpenFile(panicFile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY|os.O_APPEND, 0777)
+	fp, err := os.OpenFile(panicFile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		logs.Println("NODE", "open 'panic.log' failed: "+err.Error())
+		return
+	}
+	if err := fp.Chmod(0600); err != nil {
+		_ = fp.Close()
 		return
 	}
 	err = syscall.Dup2(int(fp.Fd()), int(os.Stderr.Fd()))
@@ -43,4 +47,3 @@ func (this *Node) handlePanic() {
 		logs.Println("NODE", "write to 'panic.log' failed: "+err.Error())
 	}
 }
-

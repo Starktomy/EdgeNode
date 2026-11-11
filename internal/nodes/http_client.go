@@ -2,6 +2,7 @@ package nodes
 
 import (
 	"net/http"
+	"sync/atomic"
 
 	"github.com/TeaOSLab/EdgeNode/internal/utils/fasttime"
 )
@@ -9,17 +10,18 @@ import (
 // HTTPClient HTTP客户端
 type HTTPClient struct {
 	rawClient       *http.Client
-	accessAt        int64
+	accessAt        atomic.Int64
 	isProxyProtocol bool
 }
 
 // NewHTTPClient 获取新客户端对象
 func NewHTTPClient(rawClient *http.Client, isProxyProtocol bool) *HTTPClient {
-	return &HTTPClient{
+	client := &HTTPClient{
 		rawClient:       rawClient,
-		accessAt:        fasttime.Now().Unix(),
 		isProxyProtocol: isProxyProtocol,
 	}
+	client.UpdateAccessTime()
+	return client
 }
 
 // RawClient 获取原始客户端对象
@@ -29,12 +31,12 @@ func (this *HTTPClient) RawClient() *http.Client {
 
 // UpdateAccessTime 更新访问时间
 func (this *HTTPClient) UpdateAccessTime() {
-	this.accessAt = fasttime.Now().Unix()
+	this.accessAt.Store(fasttime.Now().Unix())
 }
 
 // AccessTime 获取访问时间
 func (this *HTTPClient) AccessTime() int64 {
-	return this.accessAt
+	return this.accessAt.Load()
 }
 
 // IsProxyProtocol 判断是否为PROXY Protocol

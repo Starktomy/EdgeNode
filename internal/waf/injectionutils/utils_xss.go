@@ -94,5 +94,6 @@ func detectXSSOne(input string, isStrict bool) bool {
 	if isStrict {
 		isStrictInt = 1
 	}
-	return C.libinjection_xss(cInput, C.size_t(len(input)), C.int(isStrictInt)) == 1
+	// Keep parser errors on the rejecting path; only a clean zero is benign.
+	return C.libinjection_xss(cInput, C.size_t(len(input)), C.int(isStrictInt)) != C.LIBINJECTION_RESULT_FALSE
 }

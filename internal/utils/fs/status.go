@@ -5,6 +5,8 @@ package fsutils
 import (
 	"encoding/json"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	teaconst "github.com/TeaOSLab/EdgeNode/internal/const"
@@ -37,12 +39,13 @@ const (
 )
 
 var (
-	DiskSpeed   = SpeedLow
-	DiskSpeedMB float64
+	diskSpeed   = SpeedLow
+	diskSpeedMB float64
 )
 
-var IsInHighLoad = false
-var IsInExtremelyHighLoad = false
+var statusMu sync.RWMutex
+var highLoad atomic.Bool
+var extremelyHighLoad atomic.Bool
 
 const (
 	highLoad1Threshold          = 20
@@ -63,8 +66,10 @@ func init() {
 			var cache = &DiskSpeedCache{}
 			err := json.Unmarshal(cacheData, cache)
 			if err == nil && cache.SpeedMB > 0 {
-				DiskSpeedMB = cache.SpeedMB
-				DiskSpeed = cache.Speed
+				statusMu.Lock()
+				diskSpeedMB = cache.SpeedMB
+				diskSpeed = cache.Speed
+				statusMu.Unlock()
 				countTests = cache.CountTests
 			}
 		}
@@ -93,22 +98,35 @@ func init() {
 		var ticker = time.NewTicker(5 * time.Second)
 		for range ticker.C {
 			stat, _ := load.Avg()
-			IsInExtremelyHighLoad = stat != nil && stat.Load1 > extremelyHighLoad1Threshold
-			IsInHighLoad = stat != nil && stat.Load1 > highLoad1Threshold && !DiskIsFast()
+			extremelyHighLoad.Store(stat != nil && stat.Load1 > extremelyHighLoad1Threshold)
+			highLoad.Store(stat != nil && stat.Load1 > highLoad1Threshold && !DiskIsFast())
 		}
 	})
 }
 
 func DiskIsFast() bool {
-	return DiskSpeed == SpeedExtremelyFast || DiskSpeed == SpeedFast
+	statusMu.RLock()
+	defer statusMu.RUnlock()
+	return diskSpeed == SpeedExtremelyFast || diskSpeed == SpeedFast
 }
+
+func DiskWritingSpeedMB() float64 {
+	statusMu.RLock()
+	defer statusMu.RUnlock()
+	return diskSpeedMB
+}
+
+func ExtremelyHighLoad() bool { return extremelyHighLoad.Load() }
+func HighLoad() bool          { return highLoad.Load() }
 
 func DiskIsExtremelyFast() bool {
 	// 在开发环境下返回false，以便于测试
 	if Tea.IsTesting() {
 		return false
 	}
-	return DiskSpeed == SpeedExtremelyFast
+	statusMu.RLock()
+	defer statusMu.RUnlock()
+	return diskSpeed == SpeedExtremelyFast
 }
 
 // WaitLoad wait system load to downgrade

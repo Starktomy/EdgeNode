@@ -3,6 +3,7 @@
 package fasttime
 
 import (
+	"sync/atomic"
 	"time"
 
 	teaconst "github.com/TeaOSLab/EdgeNode/internal/const"
@@ -11,9 +12,10 @@ import (
 	timeutil "github.com/iwind/TeaGo/utils/time"
 )
 
-var sharedFastTime = NewFastTime()
+var sharedFastTime atomic.Pointer[FastTime]
 
 func init() {
+	sharedFastTime.Store(NewFastTime())
 	if !teaconst.IsMain {
 		return
 	}
@@ -21,13 +23,13 @@ func init() {
 	var ticker = time.NewTicker(200 * time.Millisecond)
 	goman.New(func() {
 		for range ticker.C {
-			sharedFastTime = NewFastTime()
+			sharedFastTime.Store(NewFastTime())
 		}
 	})
 }
 
 func Now() *FastTime {
-	return sharedFastTime
+	return sharedFastTime.Load()
 }
 
 type FastTime struct {

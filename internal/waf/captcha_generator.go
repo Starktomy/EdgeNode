@@ -4,11 +4,11 @@ package waf
 
 import (
 	"bytes"
+	"crypto/rand"
 	"io"
 	"time"
 
 	"github.com/dchest/captcha"
-	"github.com/iwind/TeaGo/rands"
 )
 
 // CaptchaGenerator captcha generator
@@ -24,7 +24,7 @@ func NewCaptchaGenerator() *CaptchaGenerator {
 
 // NewCaptcha create new captcha
 func (this *CaptchaGenerator) NewCaptcha(length int) (captchaId string) {
-	captchaId = rands.HexString(16)
+	captchaId = rand.Text()[:16]
 
 	if length <= 0 || length > 20 {
 		length = 4
@@ -60,6 +60,8 @@ func (this *CaptchaGenerator) Verify(id string, digits string) bool {
 		var d = digits[i]
 		if d >= '0' && d <= '9' {
 			nb[i] = d - '0'
+		} else {
+			return false
 		}
 	}
 

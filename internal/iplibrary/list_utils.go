@@ -13,7 +13,17 @@ import (
 // AllowIP 检查IP是否被允许访问
 // 如果一个IP不在任何名单中，则允许访问
 func AllowIP(ip string, serverId int64) (canGoNext bool, inAllowList bool, expiresAt int64) {
-	if !Tea.IsTesting() { // 如果在测试环境，我们不加入一些白名单，以便于可以在本地和局域网正常测试
+	return allowIP(ip, serverId, true)
+}
+
+// AllowClientIP checks a proxy-reported client without granting internal-node or
+// loopback exemptions. Explicit administrator-managed white lists still apply.
+func AllowClientIP(ip string, serverId int64) (canGoNext bool, inAllowList bool, expiresAt int64) {
+	return allowIP(ip, serverId, false)
+}
+
+func allowIP(ip string, serverId int64, allowInternal bool) (canGoNext bool, inAllowList bool, expiresAt int64) {
+	if allowInternal && !Tea.IsTesting() { // 如果在测试环境，我们不加入一些白名单，以便于可以在本地和局域网正常测试
 		// 放行lo
 		if ip == "127.0.0.1" || ip == "::1" {
 			return true, true, 0

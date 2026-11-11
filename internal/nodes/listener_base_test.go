@@ -13,7 +13,7 @@ import (
 )
 
 func TestBaseListener_FindServer(t *testing.T) {
-	sharedNodeConfig = &nodeconfigs.NodeConfig{}
+	storeNodeConfig(&nodeconfigs.NodeConfig{})
 
 	var listener = &BaseListener{}
 	listener.Group = serverconfigs.NewServerAddressGroup("https://*:443")

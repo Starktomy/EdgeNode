@@ -94,8 +94,8 @@ func (this *BaseListener) matchSSL(domains []string) (*sslconfigs.SSLPolicy, *tl
 	}
 
 	var globalServerConfig *serverconfigs.GlobalServerConfig
-	if sharedNodeConfig != nil {
-		globalServerConfig = sharedNodeConfig.GlobalServerConfig
+	if currentNodeConfig() != nil {
+		globalServerConfig = currentNodeConfig().GlobalServerConfig
 	}
 
 	// 如果域名为空，则取第一个
@@ -192,7 +192,7 @@ func (this *BaseListener) findNamedServer(name string, exactly bool) (serverConf
 		return
 	}
 
-	var globalServerConfig = sharedNodeConfig.GlobalServerConfig
+	var globalServerConfig = currentNodeConfig().GlobalServerConfig
 	var matchDomainStrictly = globalServerConfig != nil && globalServerConfig.HTTPAll.MatchDomainStrictly
 
 	if globalServerConfig != nil &&
@@ -242,7 +242,7 @@ func (this *BaseListener) findNamedServerMatched(name string) (serverConfig *ser
 	}
 
 	// 是否严格匹配域名
-	var matchDomainStrictly = sharedNodeConfig.GlobalServerConfig != nil && sharedNodeConfig.GlobalServerConfig.HTTPAll.MatchDomainStrictly
+	var matchDomainStrictly = currentNodeConfig().GlobalServerConfig != nil && currentNodeConfig().GlobalServerConfig.HTTPAll.MatchDomainStrictly
 
 	// 如果只有一个server，则默认为这个
 	var currentServers = group.Servers()
@@ -271,7 +271,7 @@ func (this *BaseListener) helloServerNames(clientInfo *tls.ClientHelloInfo) (ser
 		}
 	}
 
-	serverNames = append(serverNames, sharedNodeConfig.IPAddresses...)
+	serverNames = append(serverNames, currentNodeConfig().IPAddresses...)
 
 	return
 }

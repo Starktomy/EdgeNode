@@ -28,7 +28,10 @@ func (this *HTTPRequest) doReverseProxy(writeToClient bool) (resultResp *http.Re
 		return
 	}
 
-	var retries = 3
+	var retries = 1
+	if canRetryOriginRequest(this.RawReq) {
+		retries = 3
+	}
 
 	var failedOriginIds []int64
 	var failedLnNodeIds []int64
@@ -49,6 +52,20 @@ func (this *HTTPRequest) doReverseProxy(writeToClient bool) (resultResp *http.Re
 	}
 
 	return
+}
+
+// A live request body is consumed and closed by Transport. Retrying a mutation
+// after the origin may have accepted it can repeat a payment or other side effect.
+func canRetryOriginRequest(req *http.Request) bool {
+	if req == nil || req.ContentLength > 0 || len(req.TransferEncoding) > 0 || req.Body != nil && req.Body != http.NoBody {
+		return false
+	}
+	switch req.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
 }
 
 // 请求源站
@@ -358,6 +375,11 @@ func (this *HTTPRequest) doOriginRequest(failedOriginIds []int64, failedLnNodeId
 	}
 
 	if requestErr != nil {
+		var bodyLimitErr *http.MaxBytesError
+		if errors.As(requestErr, &bodyLimitErr) {
+			this.writer.Send(http.StatusRequestEntityTooLarge, "Request body too large")
+			return
+		}
 		// 客户端取消请求，则不提示
 		var httpErr *url.Error
 		var ok = errors.As(requestErr, &httpErr)

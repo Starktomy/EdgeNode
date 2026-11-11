@@ -3,7 +3,7 @@ package checkpoints
 import (
 	"bytes"
 	"io"
-	"net/http"
+	"mime"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -35,7 +35,11 @@ func (this *RequestUploadCheckpoint) RequestValue(req requests.Request, param st
 		value = 0
 	}
 
-	if req.WAFRaw().Method != http.MethodPost {
+	mediaType, _, mediaErr := mime.ParseMediaType(req.WAFRaw().Header.Get("Content-Type"))
+	if mediaErr != nil && strings.HasPrefix(strings.ToLower(req.WAFRaw().Header.Get("Content-Type")), "multipart/") {
+		return value, false, nil, mediaErr
+	}
+	if !strings.EqualFold(mediaType, "multipart/form-data") {
 		return
 	}
 

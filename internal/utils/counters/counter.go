@@ -70,24 +70,16 @@ func (this *Counter[T]) WithGC() *Counter[T] {
 // Increase key
 func (this *Counter[T]) Increase(key uint64, lifeSeconds int) T {
 	var index = int(key % this.countMaps)
-	this.locker.RLock(index)
+	this.locker.Lock(index)
+	defer this.locker.Unlock(index)
+
 	var item = this.itemMaps[index][key] // item MUST NOT be pointer
-	this.locker.RUnlock(index)
 	if !item.IsOk() {
-		// no need to care about duplication
-		// always insert new item even when itemMap is full
 		item = NewItem[T](lifeSeconds)
-		var result = item.Increase()
-		this.locker.Lock(index)
-		this.itemMaps[index][key] = item
-		this.locker.Unlock(index)
-		return result
 	}
 
-	this.locker.Lock(index)
 	var result = item.Increase()
 	this.itemMaps[index][key] = item // overwrite
-	this.locker.Unlock(index)
 	return result
 }
 
@@ -173,7 +165,11 @@ func (this *Counter[T]) GC() {
 	if len(expiredKeys) > 0 {
 		this.locker.Lock(gcIndex)
 		for _, key := range expiredKeys {
-			delete(itemMap, key)
+			// A concurrent request may have refreshed an item after the scan.
+			var currentItem = itemMap[key]
+			if currentItem.IsExpired(currentTime) {
+				delete(itemMap, key)
+			}
 		}
 		this.locker.Unlock(gcIndex)
 	}

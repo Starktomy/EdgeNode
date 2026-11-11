@@ -3,8 +3,6 @@
 package requests
 
 import (
-	"bytes"
-	"io"
 	"net"
 	"net/http"
 )
@@ -46,19 +44,11 @@ func (this *TestRequest) WAFRemoteIP() string {
 }
 
 func (this *TestRequest) WAFReadBody(max int64) (data []byte, err error) {
-	if this.req.ContentLength > 0 {
-		data, err = io.ReadAll(io.LimitReader(this.req.Body, max))
-	}
-	return
+	return InspectRequestBody(this.req, max)
 }
 
 func (this *TestRequest) WAFRestoreBody(data []byte) {
-	if len(data) > 0 {
-		rawReader := bytes.NewBuffer(data)
-		buf := make([]byte, 1024)
-		_, _ = io.CopyBuffer(rawReader, this.req.Body, buf)
-		this.req.Body = io.NopCloser(rawReader)
-	}
+	RestoreRequestBody(this.req, data)
 }
 
 func (this *TestRequest) WAFServerId() int64 {

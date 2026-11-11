@@ -24,10 +24,12 @@ func FindActionInstance(action ActionString, options maps.Map) ActionInterface {
 					optionsJSON, err := json.Marshal(options)
 					if err != nil {
 						remotelogs.Error("WAF_FindActionInstance", "encode options to json failed: "+err.Error())
+						return nil
 					} else {
 						err = json.Unmarshal(optionsJSON, instance)
 						if err != nil {
 							remotelogs.Error("WAF_FindActionInstance", "decode options from json failed: "+err.Error())
+							return nil
 						}
 					}
 				}

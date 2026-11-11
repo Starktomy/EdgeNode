@@ -63,7 +63,7 @@ func (this *SyncAPINodesTask) Stop() {
 
 func (this *SyncAPINodesTask) Loop() error {
 	// 如果有节点定制的API节点地址
-	var hasCustomizedAPINodeAddrs = sharedNodeConfig != nil && len(sharedNodeConfig.APINodeAddrs) > 0
+	var hasCustomizedAPINodeAddrs = currentNodeConfig() != nil && len(currentNodeConfig().APINodeAddrs) > 0
 
 	config, err := configs.LoadAPIConfig()
 	if err != nil {

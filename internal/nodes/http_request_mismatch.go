@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/TeaOSLab/EdgeCommon/pkg/nodeutils"
 	"github.com/TeaOSLab/EdgeCommon/pkg/serverconfigs"
 	"github.com/TeaOSLab/EdgeCommon/pkg/serverconfigs/firewallconfigs"
 	"github.com/TeaOSLab/EdgeNode/internal/utils"
@@ -17,14 +16,10 @@ import (
 
 // 域名无匹配情况处理
 func (this *HTTPRequest) doMismatch() {
-	// 是否为健康检查
-	var healthCheckKey = this.RawReq.Header.Get(serverconfigs.HealthCheckHeaderName)
-	if len(healthCheckKey) > 0 {
-		_, err := nodeutils.Base64DecodeMap(healthCheckKey)
-		if err == nil {
-			this.writer.WriteHeader(http.StatusOK)
-			return
-		}
+	// Only a probe authenticated earlier in Do may bypass domain matching.
+	if this.isHealthCheck {
+		this.writer.WriteHeader(http.StatusOK)
+		return
 	}
 
 	// 是否已经在黑名单
@@ -35,7 +30,7 @@ func (this *HTTPRequest) doMismatch() {
 	}
 
 	// 根据配置进行相应的处理
-	var nodeConfig = sharedNodeConfig // copy
+	var nodeConfig = currentNodeConfig() // copy
 	if nodeConfig != nil {
 		var globalServerConfig = nodeConfig.GlobalServerConfig
 		if globalServerConfig != nil && globalServerConfig.HTTPAll.MatchDomainStrictly {

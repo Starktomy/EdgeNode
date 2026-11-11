@@ -157,10 +157,6 @@ func (this *Node) execNodeLevelChangedTask(rpcClient *rpc.RPCClient) error {
 		return err
 	}
 
-	if sharedNodeConfig != nil {
-		sharedNodeConfig.Level = levelInfoResp.Level
-	}
-
 	var parentNodes = map[int64][]*nodeconfigs.ParentNodeConfig{}
 	if len(levelInfoResp.ParentNodesMapJSON) > 0 {
 		err = json.Unmarshal(levelInfoResp.ParentNodesMapJSON, &parentNodes)
@@ -169,11 +165,11 @@ func (this *Node) execNodeLevelChangedTask(rpcClient *rpc.RPCClient) error {
 		}
 	}
 
-	if sharedNodeConfig != nil {
-		sharedNodeConfig.ParentNodes = parentNodes
-	}
-
-	return nil
+	return this.updateNodeSnapshot(func(config *nodeconfigs.NodeConfig) error {
+		config.Level = levelInfoResp.Level
+		config.ParentNodes = parentNodes
+		return nil
+	})
 }
 
 // DDoS配置变更
@@ -183,10 +179,7 @@ func (this *Node) execDDoSProtectionChangedTask(rpcClient *rpc.RPCClient) error 
 		return err
 	}
 	if len(resp.DdosProtectionJSON) == 0 {
-		if sharedNodeConfig != nil {
-			sharedNodeConfig.DDoSProtection = nil
-		}
-		return nil
+		return this.updateNodeSnapshot(func(config *nodeconfigs.NodeConfig) error { config.DDoSProtection = nil; return nil })
 	}
 
 	var ddosProtectionConfig = &ddosconfigs.ProtectionConfig{}
@@ -195,8 +188,8 @@ func (this *Node) execDDoSProtectionChangedTask(rpcClient *rpc.RPCClient) error 
 		return fmt.Errorf("decode DDoS protection config failed: %w", err)
 	}
 
-	if ddosProtectionConfig != nil && sharedNodeConfig != nil {
-		sharedNodeConfig.DDoSProtection = ddosProtectionConfig
+	if err := this.updateNodeSnapshot(func(config *nodeconfigs.NodeConfig) error { config.DDoSProtection = ddosProtectionConfig; return nil }); err != nil {
+		return err
 	}
 
 	go func() {
@@ -228,9 +221,7 @@ func (this *Node) execGlobalServerConfigChangedTask(rpcClient *rpc.RPCClient) er
 			if err != nil {
 				return fmt.Errorf("validate global server config failed: %w", err)
 			}
-			if sharedNodeConfig != nil {
-				sharedNodeConfig.GlobalServerConfig = globalServerConfig
-			}
+			return this.updateNodeSnapshot(func(config *nodeconfigs.NodeConfig) error { config.GlobalServerConfig = globalServerConfig; return nil })
 		}
 	}
 	return nil
@@ -259,7 +250,7 @@ func (this *Node) execUserServersStateChangedTask(rpcClient *rpc.RPCClient, task
 // 更新一组服务列表
 func (this *Node) execUpdatingServersTask(rpcClient *rpc.RPCClient) error {
 	if this.lastUpdatingServerListId <= 0 {
-		this.lastUpdatingServerListId = sharedNodeConfig.UpdatingServerListId
+		this.lastUpdatingServerListId = currentNodeConfig().UpdatingServerListId
 	}
 
 	resp, err := rpcClient.UpdatingServerListRPC.FindUpdatingServerLists(rpcClient.Context(), &pb.FindUpdatingServerListsRequest{LastId: this.lastUpdatingServerListId})
@@ -354,8 +345,7 @@ func (this *Node) execWebPPolicyChangedTask(rpcClient *rpc.RPCClient) error {
 			webPPolicyMap[policy.NodeClusterId] = webPPolicy
 		}
 	}
-	sharedNodeConfig.UpdateWebPImagePolicies(webPPolicyMap)
-	return nil
+	return this.updateNodeSnapshot(func(config *nodeconfigs.NodeConfig) error { config.UpdateWebPImagePolicies(webPPolicyMap); return nil })
 }
 
 // 标记任务完成

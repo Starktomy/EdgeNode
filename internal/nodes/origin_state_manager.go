@@ -73,7 +73,7 @@ func (this *OriginStateManager) Stop() {
 
 // Loop 单次循环检查
 func (this *OriginStateManager) Loop() error {
-	var nodeConfig = sharedNodeConfig // 复制
+	var nodeConfig = currentNodeConfig() // 复制
 	if nodeConfig == nil {
 		return nil
 	}

@@ -16,6 +16,9 @@ type RequestJSONArgCheckpoint struct {
 }
 
 func (this *RequestJSONArgCheckpoint) RequestValue(req requests.Request, param string, options maps.Map, ruleId int64) (value any, hasRequestBody bool, sysErr error, userErr error) {
+	if this.RequestBodyIsEmpty(req) {
+		return "", false, nil, nil
+	}
 	var bodyData = req.WAFGetCacheBody()
 	hasRequestBody = true
 	if len(bodyData) == 0 {
@@ -27,6 +30,9 @@ func (this *RequestJSONArgCheckpoint) RequestValue(req requests.Request, param s
 		bodyData = data
 		req.WAFSetCacheBody(data)
 		defer req.WAFRestoreBody(data)
+	}
+	if len(bodyData) == 0 {
+		return "", hasRequestBody, nil, nil
 	}
 
 	// TODO improve performance

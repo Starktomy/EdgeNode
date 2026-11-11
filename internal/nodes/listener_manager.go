@@ -238,7 +238,7 @@ func (this *ListenerManager) findProcessNameWithPort(isUdp bool, port string) st
 }
 
 func (this *ListenerManager) addToFirewalld(groupAddrs []string) {
-	if !sharedNodeConfig.AutoOpenPorts {
+	if !currentNodeConfig().AutoOpenPorts {
 		return
 	}
 
@@ -247,7 +247,7 @@ func (this *ListenerManager) addToFirewalld(groupAddrs []string) {
 	}
 
 	// HTTP/3相关端口
-	var http3Ports = sharedNodeConfig.FindHTTP3Ports()
+	var http3Ports = currentNodeConfig().FindHTTP3Ports()
 	if len(http3Ports) > 0 {
 		for _, port := range http3Ports {
 			var groupAddr = "udp://:" + types.String(port)
@@ -348,7 +348,7 @@ func (this *ListenerManager) reloadFirewalld() {
 	this.locker.Lock()
 	defer this.locker.Unlock()
 
-	var nodeConfig = sharedNodeConfig
+	var nodeConfig = currentNodeConfig()
 
 	// 所有的新地址
 	var groupAddrs = []string{}

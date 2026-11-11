@@ -87,7 +87,12 @@ func (this *List) ExpiresAt(itemId uint64) int64 {
 }
 
 func (this *List) GC(timestamp int64) ItemMap {
-	if this.lastTimestamp > timestamp+1 {
+	this.mu.RLock()
+	var lastTimestamp = this.lastTimestamp
+	var callback = this.gcCallback
+	var batchCallback = this.gcBatchCallback
+	this.mu.RUnlock()
+	if lastTimestamp > timestamp+1 {
 		return nil
 	}
 	var itemMap = this.gcItems(timestamp)
@@ -95,13 +100,13 @@ func (this *List) GC(timestamp int64) ItemMap {
 		return itemMap
 	}
 
-	if this.gcCallback != nil {
+	if callback != nil {
 		for itemId := range itemMap {
-			this.gcCallback(itemId)
+			callback(itemId)
 		}
 	}
-	if this.gcBatchCallback != nil {
-		this.gcBatchCallback(itemMap)
+	if batchCallback != nil {
+		batchCallback(itemMap)
 	}
 
 	return itemMap
@@ -111,6 +116,7 @@ func (this *List) Clean() {
 	this.mu.Lock()
 	this.itemsMap = map[uint64]int64{}
 	this.expireMap = map[int64]ItemMap{}
+	this.lastTimestamp = 0
 	this.mu.Unlock()
 }
 
@@ -122,12 +128,16 @@ func (this *List) Count() int {
 }
 
 func (this *List) OnGC(callback func(itemId uint64)) *List {
+	this.mu.Lock()
 	this.gcCallback = callback
+	this.mu.Unlock()
 	return this
 }
 
 func (this *List) OnGCBatch(callback func(itemMap ItemMap)) *List {
+	this.mu.Lock()
 	this.gcBatchCallback = callback
+	this.mu.Unlock()
 	return this
 }
 
@@ -140,6 +150,8 @@ func (this *List) ItemsMap() map[uint64]int64 {
 }
 
 func (this *List) LastTimestamp() int64 {
+	this.mu.RLock()
+	defer this.mu.RUnlock()
 	return this.lastTimestamp
 }
 
@@ -160,17 +172,15 @@ func (this *List) removeItem(itemId uint64) {
 }
 
 func (this *List) gcItems(timestamp int64) ItemMap {
-	this.mu.RLock()
+	this.mu.Lock()
+	defer this.mu.Unlock()
 	expireItemsMap, ok := this.expireMap[timestamp]
-	this.mu.RUnlock()
 
 	if ok {
-		this.mu.Lock()
 		for itemId := range expireItemsMap {
 			delete(this.itemsMap, itemId)
 		}
 		delete(this.expireMap, timestamp)
-		this.mu.Unlock()
 	}
 
 	return expireItemsMap

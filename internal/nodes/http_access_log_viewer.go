@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/TeaOSLab/EdgeCommon/pkg/rpc/pb"
 	teaconst "github.com/TeaOSLab/EdgeNode/internal/const"
@@ -83,6 +84,14 @@ func (this *HTTPAccessLogViewer) HasConns() bool {
 
 // Send 发送日志
 func (this *HTTPAccessLogViewer) Send(accessLog *pb.HTTPAccessLog) {
+	this.sendLine(formatAccessLogLine(accessLog))
+}
+
+func formatAccessLogLine(accessLog *pb.HTTPAccessLog) string {
+	return accessLog.RemoteAddr + " [" + accessLog.TimeLocal + "] \"" + accessLog.RequestMethod + " " + accessLog.Scheme + "://" + accessLog.Host + accessLog.RequestURI + " " + accessLog.Proto + "\" " + types.String(accessLog.Status) + " " + types.String(accessLog.BytesSent) + " " + strconv.Quote(accessLog.Referer) + " " + strconv.Quote(accessLog.UserAgent) + " - " + fmt.Sprintf("%.2fms", accessLog.RequestTime*1000) + "\n"
+}
+
+func (this *HTTPAccessLogViewer) sendLine(line string) {
 	var conns = []net.Conn{}
 	this.locker.Lock()
 	for _, conn := range this.connMap {
@@ -95,8 +104,13 @@ func (this *HTTPAccessLogViewer) Send(accessLog *pb.HTTPAccessLog) {
 	}
 
 	for _, conn := range conns {
-		// ignore error
-		_, _ = conn.Write([]byte(accessLog.RemoteAddr + " [" + accessLog.TimeLocal + "] \"" + accessLog.RequestMethod + " " + accessLog.Scheme + "://" + accessLog.Host + accessLog.RequestURI + " " + accessLog.Proto + "\" " + types.String(accessLog.Status) + " " + types.String(accessLog.BytesSent) + " " + strconv.Quote(accessLog.Referer) + " " + strconv.Quote(accessLog.UserAgent) + " - " + fmt.Sprintf("%.2fms", accessLog.RequestTime*1000) + "\n"))
+		if err := conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+			_ = conn.Close()
+			continue
+		}
+		if _, err := conn.Write([]byte(line)); err != nil {
+			_ = conn.Close()
+		}
 	}
 }
 

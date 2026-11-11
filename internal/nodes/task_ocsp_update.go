@@ -22,7 +22,7 @@ func init() {
 	}
 
 	events.On(events.EventLoaded, func() {
-		sharedOCSPTask.version = sharedNodeConfig.OCSPVersion
+		sharedOCSPTask.version = currentNodeConfig().OCSPVersion
 
 		goman.New(func() {
 			sharedOCSPTask.Start()
@@ -79,8 +79,8 @@ func (this *OCSPUpdateTask) Loop() error {
 
 	for _, ocsp := range resp.SslCertOCSP {
 		// 更新OCSP
-		if sharedNodeConfig != nil {
-			sharedNodeConfig.UpdateCertOCSP(ocsp.SslCertId, ocsp.Data, ocsp.ExpiresAt)
+		if currentNodeConfig() != nil {
+			currentNodeConfig().UpdateCertOCSP(ocsp.SslCertId, ocsp.Data, ocsp.ExpiresAt)
 		}
 
 		// 修改版本

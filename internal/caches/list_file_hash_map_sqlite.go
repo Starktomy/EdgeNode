@@ -5,6 +5,7 @@ package caches
 import (
 	"math/big"
 	"sync"
+	"sync/atomic"
 
 	memutils "github.com/TeaOSLab/EdgeNode/internal/utils/mem"
 	"github.com/TeaOSLab/EdgeNode/internal/utils/zero"
@@ -24,8 +25,8 @@ type SQLiteFileListHashMap struct {
 
 	lockers []*sync.RWMutex
 
-	isAvailable bool
-	isReady     bool
+	isAvailable atomic.Bool
+	isReady     atomic.Bool
 }
 
 func NewSQLiteFileListHashMap() *SQLiteFileListHashMap {
@@ -38,10 +39,8 @@ func NewSQLiteFileListHashMap() *SQLiteFileListHashMap {
 	}
 
 	return &SQLiteFileListHashMap{
-		m:           m,
-		lockers:     lockers,
-		isAvailable: false,
-		isReady:     false,
+		m:       m,
+		lockers: lockers,
 	}
 }
 
@@ -51,7 +50,7 @@ func (this *SQLiteFileListHashMap) Load(db *SQLiteFileListDB) error {
 		return nil
 	}
 
-	this.isAvailable = true
+	this.isAvailable.Store(true)
 
 	var lastId int64
 	var maxLoops = 50_000
@@ -72,12 +71,12 @@ func (this *SQLiteFileListHashMap) Load(db *SQLiteFileListDB) error {
 		}
 	}
 
-	this.isReady = true
+	this.isReady.Store(true)
 	return nil
 }
 
 func (this *SQLiteFileListHashMap) Add(hash string) {
-	if !this.isAvailable {
+	if !this.isAvailable.Load() {
 		return
 	}
 
@@ -89,7 +88,7 @@ func (this *SQLiteFileListHashMap) Add(hash string) {
 }
 
 func (this *SQLiteFileListHashMap) AddHashes(hashes []string) {
-	if !this.isAvailable {
+	if !this.isAvailable.Load() {
 		return
 	}
 
@@ -102,7 +101,7 @@ func (this *SQLiteFileListHashMap) AddHashes(hashes []string) {
 }
 
 func (this *SQLiteFileListHashMap) Delete(hash string) {
-	if !this.isAvailable {
+	if !this.isAvailable.Load() {
 		return
 	}
 
@@ -113,10 +112,10 @@ func (this *SQLiteFileListHashMap) Delete(hash string) {
 }
 
 func (this *SQLiteFileListHashMap) Exist(hash string) bool {
-	if !this.isAvailable {
+	if !this.isAvailable.Load() {
 		return true
 	}
-	if !this.isReady {
+	if !this.isReady.Load() {
 		// 只有完全Ready时才能判断是否为false
 		return true
 	}
@@ -145,7 +144,7 @@ func (this *SQLiteFileListHashMap) Clean() {
 }
 
 func (this *SQLiteFileListHashMap) IsReady() bool {
-	return this.isReady
+	return this.isReady.Load()
 }
 
 func (this *SQLiteFileListHashMap) Len() int {
@@ -166,11 +165,11 @@ func (this *SQLiteFileListHashMap) Len() int {
 }
 
 func (this *SQLiteFileListHashMap) SetIsAvailable(isAvailable bool) {
-	this.isAvailable = isAvailable
+	this.isAvailable.Store(isAvailable)
 }
 
 func (this *SQLiteFileListHashMap) SetIsReady(isReady bool) {
-	this.isReady = isReady
+	this.isReady.Store(isReady)
 }
 
 func (this *SQLiteFileListHashMap) bigInt(hash string) (hashInt uint64, index int) {

@@ -39,7 +39,10 @@ func (this *RequestFormArgCheckpoint) RequestValue(req requests.Request, param s
 	}
 
 	// TODO improve performance
-	values, _ := url.ParseQuery(string(bodyData))
+	values, parseErr := url.ParseQuery(string(bodyData))
+	if parseErr != nil {
+		return "", hasRequestBody, nil, parseErr
+	}
 	return values.Get(param), hasRequestBody, nil, nil
 }
 

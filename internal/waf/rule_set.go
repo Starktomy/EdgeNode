@@ -6,7 +6,6 @@ import (
 	"sort"
 
 	"github.com/TeaOSLab/EdgeCommon/pkg/serverconfigs/firewallconfigs"
-	"github.com/TeaOSLab/EdgeNode/internal/remotelogs"
 	"github.com/TeaOSLab/EdgeNode/internal/utils"
 	"github.com/TeaOSLab/EdgeNode/internal/waf/requests"
 	wafutils "github.com/TeaOSLab/EdgeNode/internal/waf/utils"
@@ -85,14 +84,12 @@ func (this *RuleSet) Init(waf *WAF) error {
 	for _, action := range this.Actions {
 		var instance = FindActionInstance(action.Code, action.Options)
 		if instance == nil {
-			remotelogs.Error("WAF_RULE_SET", "can not find instance for action '"+action.Code+"'")
-			continue
+			return fmt.Errorf("unknown action %q", action.Code)
 		}
 
 		err := instance.Init(waf)
 		if err != nil {
-			remotelogs.Error("WAF_RULE_SET", "init action '"+action.Code+"' failed: "+err.Error())
-			continue
+			return fmt.Errorf("initialize action %q: %w", action.Code, err)
 		}
 
 		this.actionInstances = append(this.actionInstances, instance)

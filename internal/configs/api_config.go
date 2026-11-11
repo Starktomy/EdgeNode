@@ -4,8 +4,9 @@ import (
 	"errors"
 	"os"
 
+	"github.com/TeaOSLab/EdgeNode/internal/utils/atomicfile"
 	"github.com/iwind/TeaGo/Tea"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 const ConfigFileName = "api_node.yaml"
@@ -85,6 +86,5 @@ func (this *APIConfig) WriteFile(path string) error {
 	if err != nil {
 		return err
 	}
-	err = os.WriteFile(path, data, 0666)
-	return err
+	return atomicfile.Write(path, data)
 }

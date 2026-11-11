@@ -2,18 +2,15 @@ package nodes
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"net"
 	"net/http"
 	"runtime"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/TeaOSLab/EdgeCommon/pkg/serverconfigs"
-	"github.com/TeaOSLab/EdgeNode/internal/utils/fasttime"
 	"github.com/TeaOSLab/EdgeNode/internal/utils/goman"
 	"github.com/cespare/xxhash/v2"
 	"github.com/pires/go-proxyproto"
@@ -25,12 +22,14 @@ var SharedHTTPClientPool = NewHTTPClientPool()
 
 const httpClientProxyProtocolTag = "@ProxyProtocol@"
 const maxHTTPRedirects = 8
+const defaultMaxHTTPClients = 4096
 
 // HTTPClientPool 客户端池
 type HTTPClientPool struct {
 	clientsMap map[uint64]*HTTPClient // origin key => client
 
 	cleanTicker *time.Ticker
+	maxClients  int
 
 	locker sync.RWMutex
 }
@@ -38,8 +37,9 @@ type HTTPClientPool struct {
 // NewHTTPClientPool 获取新对象
 func NewHTTPClientPool() *HTTPClientPool {
 	var pool = &HTTPClientPool{
-		cleanTicker: time.NewTicker(1 * time.Hour),
+		cleanTicker: time.NewTicker(1 * time.Minute),
 		clientsMap:  map[uint64]*HTTPClient{},
+		maxClients:  defaultMaxHTTPClients,
 	}
 
 	goman.New(func() {
@@ -55,6 +55,9 @@ func (this *HTTPClientPool) Client(req *HTTPRequest,
 	originAddr string,
 	proxyProtocol *serverconfigs.ProxyProtocolConfig,
 	followRedirects bool) (rawClient *http.Client, err error) {
+	if origin == nil {
+		return nil, errors.New("origin must not be nil")
+	}
 	if origin.Addr == nil {
 		return nil, errors.New("origin addr should not be empty (originId:" + strconv.FormatInt(origin.Id, 10) + ")")
 	}
@@ -79,8 +82,16 @@ func (this *HTTPClientPool) Client(req *HTTPRequest,
 
 	// if we are under available ProxyProtocol, we add client ip to key to make every client unique
 	var isProxyProtocol = false
+	var proxyHeader *proxyproto.Header
 	if proxyProtocol != nil && proxyProtocol.IsOn {
-		rawKey += httpClientProxyProtocolTag + req.requestRemoteAddr(true)
+		proxyHeader, err = makeOriginProxyHeader(req, proxyProtocol)
+		if err != nil {
+			return nil, err
+		}
+		rawKey += httpClientProxyProtocolTag + strconv.Itoa(int(proxyHeader.Version)) + "@" + proxyHeader.SourceAddr.String()
+		if proxyHeader.DestinationAddr != nil {
+			rawKey += "@" + proxyHeader.DestinationAddr.String()
+		}
 		isProxyProtocol = true
 	}
 
@@ -110,6 +121,23 @@ func (this *HTTPClientPool) Client(req *HTTPRequest,
 	if found {
 		client.UpdateAccessTime()
 		return client.RawClient(), nil
+	}
+
+	if this.maxClients <= 0 {
+		this.maxClients = defaultMaxHTTPClients
+	}
+	if len(this.clientsMap) >= this.maxClients {
+		var oldestKey uint64
+		var oldest *HTTPClient
+		for candidateKey, candidate := range this.clientsMap {
+			if oldest == nil || candidate.AccessTime() < oldest.AccessTime() {
+				oldestKey, oldest = candidateKey, candidate
+			}
+		}
+		if oldest != nil {
+			delete(this.clientsMap, oldestKey)
+			oldest.Close()
+		}
 	}
 
 	var maxConnections = origin.MaxConns
@@ -145,25 +173,16 @@ func (this *HTTPClientPool) Client(req *HTTPRequest,
 		maxConnections *= 8
 		idleConns *= 8
 		idleTimeout *= 4
-	} else if sharedNodeConfig != nil && sharedNodeConfig.Level > 1 {
+	} else if currentNodeConfig() != nil && currentNodeConfig().Level > 1 {
 		// Ln节点可以适当增加连接数
 		maxConnections *= 2
 		idleConns *= 2
 	}
 
 	// TLS通讯
-	var tlsConfig = &tls.Config{
-		InsecureSkipVerify: true,
-	}
-	if origin.Cert != nil {
-		var obj = origin.Cert.CertObject()
-		if obj != nil {
-			tlsConfig.InsecureSkipVerify = false
-			tlsConfig.Certificates = []tls.Certificate{*obj}
-			if len(origin.Cert.ServerName) > 0 {
-				tlsConfig.ServerName = origin.Cert.ServerName
-			}
-		}
+	tlsConfig, err := originTLSConfig(origin, req.RawReq.URL.Hostname())
+	if err != nil {
+		return nil, err
 	}
 
 	var transport = &HTTPClientTransport{
@@ -186,14 +205,20 @@ func (this *HTTPClientPool) Client(req *HTTPRequest,
 				}
 
 				// handle PROXY protocol
-				proxyErr := this.handlePROXYProtocol(conn, req, proxyProtocol)
-				if proxyErr != nil {
-					return nil, proxyErr
+				if proxyHeader != nil {
+					header := *proxyHeader
+					if header.DestinationAddr == nil {
+						header.DestinationAddr = conn.RemoteAddr()
+					}
+					if _, proxyErr := header.WriteTo(conn); proxyErr != nil {
+						_ = conn.Close()
+						return nil, proxyErr
+					}
 				}
 
 				return NewOriginConn(conn), nil
 			},
-			MaxIdleConns:          0,
+			MaxIdleConns:          idleConns,
 			MaxIdleConnsPerHost:   idleConns,
 			MaxConnsPerHost:       maxConnections,
 			IdleConnTimeout:       idleTimeout,
@@ -230,73 +255,55 @@ func (this *HTTPClientPool) Client(req *HTTPRequest,
 
 // 清理不使用的Client
 func (this *HTTPClientPool) cleanClients() {
-	for range this.cleanTicker.C {
-		var nowTime = fasttime.Now().Unix()
-
-		var expiredKeys []uint64
-		var expiredClients = []*HTTPClient{}
-
-		// lookup expired clients
-		this.locker.RLock()
-		for k, client := range this.clientsMap {
-			if client.AccessTime() < nowTime-86400 ||
-				(client.IsProxyProtocol() && client.AccessTime() < nowTime-3600) { // 超过 N 秒没有调用就关闭
-				expiredKeys = append(expiredKeys, k)
-				expiredClients = append(expiredClients, client)
-			}
-		}
-		this.locker.RUnlock()
-
-		// remove expired keys
-		if len(expiredKeys) > 0 {
-			this.locker.Lock()
-			for _, k := range expiredKeys {
-				delete(this.clientsMap, k)
-			}
-			this.locker.Unlock()
-		}
-
-		// close expired clients
-		if len(expiredClients) > 0 {
-			for _, client := range expiredClients {
-				client.Close()
-			}
-		}
+	for now := range this.cleanTicker.C {
+		this.pruneClients(now.Unix())
 	}
 }
 
-// 支持PROXY Protocol
-func (this *HTTPClientPool) handlePROXYProtocol(conn net.Conn, req *HTTPRequest, proxyProtocol *serverconfigs.ProxyProtocolConfig) error {
-	if proxyProtocol != nil &&
-		proxyProtocol.IsOn &&
-		(proxyProtocol.Version == serverconfigs.ProxyProtocolVersion1 || proxyProtocol.Version == serverconfigs.ProxyProtocolVersion2) {
-		var remoteAddr = req.requestRemoteAddr(true)
-		var transportProtocol = proxyproto.TCPv4
-		if strings.Contains(remoteAddr, ":") {
-			transportProtocol = proxyproto.TCPv6
+func (this *HTTPClientPool) pruneClients(now int64) {
+	var expired []*HTTPClient
+	this.locker.Lock()
+	for key, client := range this.clientsMap {
+		idleSeconds := int64(600)
+		if client.IsProxyProtocol() {
+			idleSeconds = 120
 		}
-		var destAddr = conn.RemoteAddr()
-		var reqConn = req.RawReq.Context().Value(HTTPConnContextKey)
-		if reqConn != nil {
-			destAddr = reqConn.(net.Conn).LocalAddr()
+		if client.AccessTime() < now-idleSeconds {
+			delete(this.clientsMap, key)
+			expired = append(expired, client)
 		}
-		var header = proxyproto.Header{
-			Version:           byte(proxyProtocol.Version),
-			Command:           proxyproto.PROXY,
-			TransportProtocol: transportProtocol,
-			SourceAddr: &net.TCPAddr{
-				IP:   net.ParseIP(remoteAddr),
-				Port: req.requestRemotePort(),
-			},
-			DestinationAddr: destAddr,
-		}
-		_, err := header.WriteTo(conn)
-		if err != nil {
-			_ = conn.Close()
-			return err
-		}
-		return nil
 	}
+	this.locker.Unlock()
+	for _, client := range expired {
+		client.Close()
+	}
+}
 
-	return nil
+// makeOriginProxyHeader snapshots connection metadata without retaining the
+// request, its body, ResponseWriter, or configuration snapshot in the transport.
+func makeOriginProxyHeader(req *HTTPRequest, config *serverconfigs.ProxyProtocolConfig) (*proxyproto.Header, error) {
+	if config.Version != serverconfigs.ProxyProtocolVersion1 && config.Version != serverconfigs.ProxyProtocolVersion2 {
+		return nil, errors.New("unsupported PROXY protocol version")
+	}
+	remoteIP := net.ParseIP(req.requestRemoteAddr(true))
+	if remoteIP == nil {
+		return nil, errors.New("invalid PROXY protocol client IP")
+	}
+	protocol := proxyproto.TCPv4
+	if remoteIP.To4() == nil {
+		protocol = proxyproto.TCPv6
+	}
+	var destination net.Addr
+	if conn, ok := req.RawReq.Context().Value(HTTPConnContextKey).(net.Conn); ok {
+		if local, ok := conn.LocalAddr().(*net.TCPAddr); ok {
+			destination = &net.TCPAddr{IP: append(net.IP(nil), local.IP...), Port: local.Port, Zone: local.Zone}
+		}
+	}
+	return &proxyproto.Header{
+		Version:           byte(config.Version),
+		Command:           proxyproto.PROXY,
+		TransportProtocol: protocol,
+		SourceAddr:        &net.TCPAddr{IP: remoteIP, Port: req.requestRemotePort()},
+		DestinationAddr:   destination,
+	}, nil
 }

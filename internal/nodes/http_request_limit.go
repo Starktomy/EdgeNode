@@ -4,23 +4,19 @@ package nodes
 
 import (
 	"net/http"
-
-	"github.com/TeaOSLab/EdgeNode/internal/iplibrary"
 )
 
 func (this *HTTPRequest) doRequestLimit() (shouldStop bool) {
-	// 是否在全局名单中
-	_, isInAllowedList, _ := iplibrary.AllowIP(this.RemoteAddr(), this.ReqServer.Id)
-	if isInAllowedList {
-		return false
+	// Enforce entity size even when the peer is otherwise exempt from rate limits.
+	if err := this.prepareRequestBodyLimit(); err != nil {
+		this.writer.Send(http.StatusRequestEntityTooLarge, "Request body too large")
+		return true
 	}
 
-	// 检查请求Body尺寸
-	// TODO 处理分片提交的内容
-	if this.web.RequestLimit.MaxBodyBytes() > 0 &&
-		this.RawReq.ContentLength > this.web.RequestLimit.MaxBodyBytes() {
-		this.writeCode(http.StatusRequestEntityTooLarge, "", "")
-		return true
+	// 是否在全局名单中
+	_, isInAllowedList, _ := this.allowClientIP(this.RemoteAddr())
+	if isInAllowedList {
+		return false
 	}
 
 	// 设置连接相关参数
